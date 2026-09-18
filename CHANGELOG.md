@@ -1,5 +1,11 @@
 # 更新记录
 
+## 1.5.1
+
+- 删掉所有旧的 `mcbot` 兼容：移除 `/mcbot` 命令别名、移除 `mcbot.admin` / `mcbot.talk` 权限节点
+- 现在只有 `/ghost` 一条命令，权限节点只有 `theghost.admin` / `theghost.talk`
+- 提示信息与文档同步（权限不足时提示 `theghost.admin`）
+
 ## 1.5.0
 
 - **项目更名为 The Ghost（幽灵）**：README 标题、游戏内标题、命令提示、AI 人设提示词里所有「回声」都改成「幽灵」

@@ -900,13 +900,13 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         return ChatColor.translateAlternateColorCodes('&', text);
     }
 
-    /** 权限节点：新节点优先，旧 mcbot.* 节点继续认，服务器不用改 LuckPerms。 */
+    /** 权限节点只有 theghost.*，旧的 mcbot.* 已废弃。 */
     private static boolean hasAdmin(CommandSender sender) {
-        return sender.hasPermission("theghost.admin") || sender.hasPermission("mcbot.admin");
+        return sender.hasPermission("theghost.admin");
     }
 
     private static boolean hasTalk(CommandSender sender) {
-        return sender.hasPermission("theghost.talk") || sender.hasPermission("mcbot.talk");
+        return sender.hasPermission("theghost.talk");
     }
 
     public boolean soundsEnabled() {

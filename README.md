@@ -7,12 +7,12 @@
 适配环境：Purpur/Paper 26.1.2（Java 25），兼容 1.21+。
 
 > 插件名（Bukkit 只允许英文字母、数字和 `._-`）用英文 **TheGhost**：数据目录 `plugins/TheGhost/`、
-> jar 名 `theghost-<版本>.jar`；游戏里和中文文档里叫「幽灵」，管理命令 `/ghost`（旧命令 `/mcbot` 仍可用）。
+> jar 名 `theghost-<版本>.jar`；游戏里和中文文档里叫「幽灵」，管理命令 `/ghost`。
 
 ## 安装
 
 1. 编译：`powershell -File build.ps1`（首次先跑 `node tools\fetch-libs.cjs` 下载编译依赖）
-2. 把 `dist\theghost-1.5.0.jar` 放进服务器的 `plugins\` 目录
+2. 把 `dist\theghost-1.5.1.jar` 放进服务器的 `plugins\` 目录
 3. 启动或重启服务器，会生成 `plugins\TheGhost\config.yml`
 4. 在配置里填 `deepseek.api-key`，然后 `/ghost reload`（或重启）
 
@@ -30,8 +30,6 @@
 | `/ghost reload` | `theghost.admin` | 重载配置（改完 API Key 用这个） |
 | `/ghost status` | 所有人 | 查看当前状态 |
 | `/ghost test [内容]` | `theghost.admin` | 直接打一次 API，结果写进控制台，用来排查连通性 |
-
-旧命令 `/mcbot` 和旧权限节点 `mcbot.talk` / `mcbot.admin` 仍然兼容，服务器不用改 LuckPerms。
 
 玩家在聊天里 `@yl` 或 `@幽灵` 它才会回话。其余聊天它完全不看——这是省钱的关键。
 

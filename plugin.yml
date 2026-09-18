@@ -1,5 +1,5 @@
 name: TheGhost
-version: 1.5.0
+version: 1.5.1
 main: mcbot.McBot
 api-version: '1.21'
 description: 一个住在服务器里的捣蛋鬼 AI「幽灵」：会嘴贫、会记仇、会真的劈你。
@@ -7,7 +7,6 @@ author: 新世界网络
 commands:
   ghost:
     description: 和服务器里的 AI 交互，或管理它的行为与记仇账本。
-    aliases: [mcbot]
     usage: /ghost <ask|poke|grudge|prank|reload|toggle|status|test> [内容]
 permissions:
   theghost.admin:
@@ -15,10 +14,4 @@ permissions:
     default: op
   theghost.talk:
     description: 允许向 AI 提问。
-    default: true
-  mcbot.admin:
-    description: 旧权限节点，等同 theghost.admin（兼容保留）。
-    default: op
-  mcbot.talk:
-    description: 旧权限节点，等同 theghost.talk（兼容保留）。
     default: true
