@@ -1,5 +1,16 @@
 # 更新记录
 
+## 1.5.0
+
+- **项目更名为 The Ghost（幽灵）**：README 标题、游戏内标题、命令提示、AI 人设提示词里所有「回声」都改成「幽灵」
+  （此前聊天前缀已经是「幽灵」，但人设还自称回声，它会答错自己的名字）
+- **插件 ID 改为 `TheGhost`**：Bukkit 只允许插件名用 `A-Za-z0-9 _.-`，中文名会直接导致插件加载失败，
+  所以内部标识用英文。数据目录随之变成 `plugins/TheGhost/`，jar 名变成 `theghost-<版本>.jar`
+- **管理命令改为 `/ghost`**，旧的 `/mcbot` 保留为别名；权限节点新增 `theghost.admin` / `theghost.talk`，
+  旧的 `mcbot.admin` / `mcbot.talk` 继续被承认（服务器不用改 LuckPerms）
+- 升级注意：改了插件名之后 Bukkit 会用新的数据目录，把旧的 `plugins/McBot/`
+  （含 `config.yml` 与 `grudge.yml`）复制一份到 `plugins/TheGhost/` 就行，配置和 API Key 不用重填
+
 ## 1.4.0
 
 - **它会真的捉弄人了**：新增三个真动作——`LIGHTNING` 在玩家头上劈闪电、

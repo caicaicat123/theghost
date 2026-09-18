@@ -1,17 +1,20 @@
-# McBot — 服务器里的捣蛋鬼 AI
+# The Ghost（幽灵）— 服务器里的捣蛋鬼 AI
 
-住在《我的世界》服务器里的一个看不见的存在，玩家叫它「回声」。平时它没有实体，
+住在《我的世界》服务器里的一个看不见的存在，玩家叫它「幽灵」。平时它没有实体，
 靠聊天、音效、屏幕标题刷存在感；**但你把它惹急了，它会真的动手**——在你头上劈闪电、
 在你身后放苦力怕。核心定位是**偶尔帮忙、时常搞怪、记仇**。
 
 适配环境：Purpur/Paper 26.1.2（Java 25），兼容 1.21+。
 
+> 插件名（Bukkit 只允许英文字母、数字和 `._-`）用英文 **TheGhost**：数据目录 `plugins/TheGhost/`、
+> jar 名 `theghost-<版本>.jar`；游戏里和中文文档里叫「幽灵」，管理命令 `/ghost`（旧命令 `/mcbot` 仍可用）。
+
 ## 安装
 
 1. 编译：`powershell -File build.ps1`（首次先跑 `node tools\fetch-libs.cjs` 下载编译依赖）
-2. 把 `dist\mcbot-1.4.0.jar` 放进服务器的 `plugins\` 目录
-3. 启动或重启服务器，会生成 `plugins\McBot\config.yml`
-4. 在配置里填 `deepseek.api-key`，然后 `/mcbot reload`（或重启）
+2. 把 `dist\theghost-1.5.0.jar` 放进服务器的 `plugins\` 目录
+3. 启动或重启服务器，会生成 `plugins\TheGhost\config.yml`
+4. 在配置里填 `deepseek.api-key`，然后 `/ghost reload`（或重启）
 
 不填 API Key 也能跑：它会退回使用 `config.yml` 里的本地台词，一样会出来搞怪，只是不会临场发挥。
 
@@ -19,14 +22,16 @@
 
 | 指令 | 权限 | 说明 |
 | --- | --- | --- |
-| `/mcbot ask <内容>` | `mcbot.talk`（所有人默认有） | 私聊它，它会回答 |
-| `/mcbot poke [玩家]` | `mcbot.admin` | 立刻让它去找某个玩家的麻烦（调试用） |
-| `/mcbot grudge [玩家] [set <分>\|reset]` | `mcbot.admin` | 查看记仇榜 / 某个玩家的记仇值，可手动改分或清零 |
-| `/mcbot prank <玩家> [lightning\|creeper\|jumpscare]` | `mcbot.admin` | 手动试一次真捉弄（不限等级和冷却） |
-| `/mcbot toggle` | `mcbot.admin` | 暂停/恢复定时搞怪 |
-| `/mcbot reload` | `mcbot.admin` | 重载配置（改完 API Key 用这个） |
-| `/mcbot status` | 所有人 | 查看当前状态 |
-| `/mcbot test [内容]` | `mcbot.admin` | 直接打一次 API，结果写进控制台，用来排查连通性 |
+| `/ghost ask <内容>` | `theghost.talk`（所有人默认有） | 私聊它，它会回答 |
+| `/ghost poke [玩家]` | `theghost.admin` | 立刻让它去找某个玩家的麻烦（调试用） |
+| `/ghost grudge [玩家] [set <分>\|reset]` | `theghost.admin` | 查看记仇榜 / 某个玩家的记仇值，可手动改分或清零 |
+| `/ghost prank <玩家> [lightning\|creeper\|jumpscare]` | `theghost.admin` | 手动试一次真捉弄（不限等级和冷却） |
+| `/ghost toggle` | `theghost.admin` | 暂停/恢复定时搞怪 |
+| `/ghost reload` | `theghost.admin` | 重载配置（改完 API Key 用这个） |
+| `/ghost status` | 所有人 | 查看当前状态 |
+| `/ghost test [内容]` | `theghost.admin` | 直接打一次 API，结果写进控制台，用来排查连通性 |
+
+旧命令 `/mcbot` 和旧权限节点 `mcbot.talk` / `mcbot.admin` 仍然兼容，服务器不用改 LuckPerms。
 
 玩家在聊天里 `@yl` 或 `@幽灵` 它才会回话。其余聊天它完全不看——这是省钱的关键。
 
@@ -45,7 +50,7 @@
 
 ## 记仇与真捉弄（v1.4.0 新增）
 
-它会给每个玩家单独记一笔账（`plugins/McBot/grudge.yml`，重启不丢）：
+它会给每个玩家单独记一笔账（`plugins/TheGhost/grudge.yml`，重启不丢）：
 
 - 在 `@yl` / `@幽灵` 的消息里骂它 → 加记仇值（默认一次 +3）
 - 夸它、跟它道歉 → 减一点（默认 -1）
@@ -134,3 +139,9 @@ mcbot\
 ├─ tools\fetch-libs.cjs   下载编译依赖
 └─ lib\                   编译依赖（paper-api、adventure）
 ```
+
+## 许可证
+
+MIT License —— 可以自由使用、修改、二次开发甚至商用，保留版权声明即可（详见 [LICENSE](LICENSE)）。
+
+版权所有 (c) 2026 新世界网络（New World Network）。

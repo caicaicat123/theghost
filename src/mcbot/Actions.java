@@ -78,7 +78,7 @@ public final class Actions {
                         return "denied";
                     }
                     String text = value.length() > 60 ? value.substring(0, 60) : value;
-                    target.sendTitle(plugin.colorize("§d" + text), plugin.colorize("§7—— 回声"), 8, 45, 12);
+                    target.sendTitle(plugin.colorize("§d" + text), plugin.colorize("§7—— 幽灵"), 8, 45, 12);
                     return "title";
                 }
                 case "JUMPSCARE" -> {

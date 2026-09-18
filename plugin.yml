@@ -1,17 +1,24 @@
-name: McBot
-version: 1.4.0
+name: TheGhost
+version: 1.5.0
 main: mcbot.McBot
 api-version: '1.21'
-description: 一个住在服务器里的捣蛋鬼 AI：会嘴贫、会记仇、会真的劈你。
+description: 一个住在服务器里的捣蛋鬼 AI「幽灵」：会嘴贫、会记仇、会真的劈你。
 author: 新世界网络
 commands:
-  mcbot:
+  ghost:
     description: 和服务器里的 AI 交互，或管理它的行为与记仇账本。
-    usage: /mcbot <ask|poke|grudge|prank|reload|toggle|status|test> [内容]
+    aliases: [mcbot]
+    usage: /ghost <ask|poke|grudge|prank|reload|toggle|status|test> [内容]
 permissions:
+  theghost.admin:
+    description: 重载配置、强制触发、暂停搞怪、查看或修改记仇、手动捉弄。
+    default: op
+  theghost.talk:
+    description: 允许向 AI 提问。
+    default: true
   mcbot.admin:
-    description: 重载配置、强制触发、暂停搞怪。
+    description: 旧权限节点，等同 theghost.admin（兼容保留）。
     default: op
   mcbot.talk:
-    description: 允许向 AI 提问。
+    description: 旧权限节点，等同 theghost.talk（兼容保留）。
     default: true

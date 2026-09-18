@@ -40,8 +40,8 @@ import java.util.stream.Collectors;
  */
 public final class McBot extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
 
-    /** 打在苦力怕身上的标记，用来认出「这是回声放的」，善后时也只清自己放的。 */
-    public static final String PRANK_META = "mcbot_prank";
+    /** 打在苦力怕身上的标记，用来认出「这是幽灵放的」，善后时也只清自己放的。 */
+    public static final String PRANK_META = "theghost_prank";
 
     private final Random random = new Random();
     private final Map<UUID, Long> lastReply = new HashMap<>();
@@ -132,12 +132,12 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         startDecayTask();
 
         getServer().getPluginManager().registerEvents(this, this);
-        if (getCommand("mcbot") != null) {
-            getCommand("mcbot").setExecutor(this);
-            getCommand("mcbot").setTabCompleter(this);
+        if (getCommand("ghost") != null) {
+            getCommand("ghost").setExecutor(this);
+            getCommand("ghost").setTabCompleter(this);
         }
         startLoop();
-        getLogger().info("回声已就位。AI=" + (ai.configured() ? "开启" : "未配置，仅使用本地台词")
+        getLogger().info("幽灵已就位。AI=" + (ai.configured() ? "开启" : "未配置，仅使用本地台词")
                 + "，记仇系统=" + (prankEnabled ? "开启" : "关闭"));
         checkConnectivity();
     }
@@ -208,7 +208,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 cfg.getInt("deepseek.timeout-seconds", 25),
                 Math.max(1, cfg.getInt("deepseek.retries", 1) + 1));
 
-        colorPrefix = cfg.getString("bot.color-prefix", "§5[回声]§r ");
+        colorPrefix = cfg.getString("bot.color-prefix", "§5[幽灵]§r ");
         aiChance = cfg.getDouble("bot.ai-chance", 0.55);
         replyCooldownSeconds = cfg.getInt("bot.reply-cooldown-seconds", 12);
 
@@ -615,7 +615,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
 
     // -------------------------------------------------------- 苦力怕善后
 
-    /** 不是回声放的苦力怕不碰；配置说不炸方块时只清方块列表，伤害照旧。 */
+    /** 不是幽灵放的苦力怕不碰；配置说不炸方块时只清方块列表，伤害照旧。 */
     @EventHandler(ignoreCancelled = true)
     public void onPrankExplode(EntityExplodeEvent event) {
         if (!(event.getEntity() instanceof Creeper creeper) || !creeper.hasMetadata(PRANK_META)) {
@@ -646,8 +646,8 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage(colorize("§5[回声]§r ask <内容> · poke [玩家] · grudge [玩家] · "
-                    + "prank <玩家> <动作> · toggle · reload · status"));
+            sender.sendMessage(colorize("§5[幽灵]§r /ghost ask <内容> · poke [玩家] · grudge [玩家] · "
+                    + "prank <玩家> <动作> · toggle · reload · status · test"));
             return true;
         }
         switch (args[0].toLowerCase(Locale.ROOT)) {
@@ -656,13 +656,13 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                     sender.sendMessage("§c这个子命令只能在游戏里用。");
                     return true;
                 }
-                if (!player.hasPermission("mcbot.talk")) {
+                if (!hasTalk(player)) {
                     player.sendMessage(colorize("§c你还没有和它说话的权利。"));
                     return true;
                 }
                 String text = String.join(" ", Arrays.copyOfRange(args, 1, args.length)).trim();
                 if (text.isEmpty()) {
-                    player.sendMessage(colorize("§7想说什么？例如 /mcbot ask 你好"));
+                    player.sendMessage(colorize("§7想说什么？例如 /ghost ask 你好"));
                     return true;
                 }
                 long now = System.currentTimeMillis();
@@ -683,8 +683,8 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 speak(player, player.getName() + " 对你说：" + text, true, true, true);
             }
             case "poke" -> {
-                if (!sender.hasPermission("mcbot.admin")) {
-                    sender.sendMessage("§c需要 mcbot.admin 权限。");
+                if (!hasAdmin(sender)) {
+                    sender.sendMessage("§c需要 theghost.admin 权限。");
                     return true;
                 }
                 Player target = args.length > 1 ? Bukkit.getPlayerExact(args[1]) : null;
@@ -697,12 +697,12 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                     }
                     target = pool.get(random.nextInt(pool.size()));
                 }
-                sender.sendMessage(colorize("§7正在让回声去找 " + target.getName() + " ……"));
+                sender.sendMessage(colorize("§7正在让幽灵去找 " + target.getName() + " ……"));
                 speak(target, "被管理员推了一把，去找点乐子", false, false);
             }
             case "grudge" -> {
-                if (!sender.hasPermission("mcbot.admin")) {
-                    sender.sendMessage("§c需要 mcbot.admin 权限。");
+                if (!hasAdmin(sender)) {
+                    sender.sendMessage("§c需要 theghost.admin 权限。");
                     return true;
                 }
                 if (grudge == null) {
@@ -710,7 +710,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                     return true;
                 }
                 if (args.length == 1) {
-                    sender.sendMessage(colorize("§5回声的记仇榜§r（最多 10 人）："));
+                    sender.sendMessage(colorize("§5幽灵的记仇榜§r（最多 10 人）："));
                     List<Grudge.Entry> top = grudge.top(10);
                     if (top.isEmpty()) {
                         sender.sendMessage("§7  没人骂过它，账本是空的。");
@@ -748,12 +748,12 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 }
             }
             case "prank" -> {
-                if (!sender.hasPermission("mcbot.admin")) {
-                    sender.sendMessage("§c需要 mcbot.admin 权限。");
+                if (!hasAdmin(sender)) {
+                    sender.sendMessage("§c需要 theghost.admin 权限。");
                     return true;
                 }
                 if (args.length < 2) {
-                    sender.sendMessage(colorize("§c用法：/mcbot prank <玩家> [lightning|creeper|jumpscare]"));
+                    sender.sendMessage(colorize("§c用法：/ghost prank <玩家> [lightning|creeper|jumpscare]"));
                     return true;
                 }
                 Player target = Bukkit.getPlayerExact(args[1]);
@@ -792,16 +792,16 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                         + " " + action + " (" + result + ")");
             }
             case "toggle" -> {
-                if (!sender.hasPermission("mcbot.admin")) {
-                    sender.sendMessage("§c需要 mcbot.admin 权限。");
+                if (!hasAdmin(sender)) {
+                    sender.sendMessage("§c需要 theghost.admin 权限。");
                     return true;
                 }
                 mischiefEnabled = !mischiefEnabled;
-                sender.sendMessage(colorize("§7回声的搞怪开关：" + (mischiefEnabled ? "开" : "关")));
+                sender.sendMessage(colorize("§7幽灵的搞怪开关：" + (mischiefEnabled ? "开" : "关")));
             }
             case "reload" -> {
-                if (!sender.hasPermission("mcbot.admin")) {
-                    sender.sendMessage("§c需要 mcbot.admin 权限。");
+                if (!hasAdmin(sender)) {
+                    sender.sendMessage("§c需要 theghost.admin 权限。");
                     return true;
                 }
                 loadSettings();
@@ -809,7 +809,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 sender.sendMessage(colorize("§7配置已重载。AI=" + (ai.configured() ? "开启" : "未配置")));
             }
             case "status" -> {
-                sender.sendMessage(colorize("§5回声§r 状态："));
+                sender.sendMessage(colorize("§5幽灵§r 状态："));
                 sender.sendMessage("§7 搞怪：" + (mischiefEnabled ? "开" : "关")
                         + "  间隔：" + intervalSeconds + "±" + jitterSeconds + " 秒"
                         + "  AI：" + (ai.configured() ? "已配置" : "未配置"));
@@ -827,8 +827,8 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                         + String.join(", ", allowedCommands));
             }
             case "test" -> {
-                if (!sender.hasPermission("mcbot.admin")) {
-                    sender.sendMessage("§c需要 mcbot.admin 权限。");
+                if (!hasAdmin(sender)) {
+                    sender.sendMessage("§c需要 theghost.admin 权限。");
                     return true;
                 }
                 if (ai == null || !ai.configured()) {
@@ -853,7 +853,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                             }
                         });
             }
-            default -> sender.sendMessage(colorize("§c未知子命令。用法：/mcbot ask|poke|grudge|prank|toggle|reload|status|test"));
+            default -> sender.sendMessage(colorize("§c未知子命令。用法：/ghost ask|poke|grudge|prank|toggle|reload|status|test"));
         }
         return true;
     }
@@ -898,6 +898,15 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
 
     public String colorize(String text) {
         return ChatColor.translateAlternateColorCodes('&', text);
+    }
+
+    /** 权限节点：新节点优先，旧 mcbot.* 节点继续认，服务器不用改 LuckPerms。 */
+    private static boolean hasAdmin(CommandSender sender) {
+        return sender.hasPermission("theghost.admin") || sender.hasPermission("mcbot.admin");
+    }
+
+    private static boolean hasTalk(CommandSender sender) {
+        return sender.hasPermission("theghost.talk") || sender.hasPermission("mcbot.talk");
     }
 
     public boolean soundsEnabled() {
