@@ -36,6 +36,106 @@ mischief:
   # 有多大比例只私聊给某个人看，其余在公屏说
   private-chance: 0.0
 
+# ---- 记仇与捉弄 ----
+# 玩家骂它 → 记仇值上升 → 它能对你动用更狠的捉弄；
+# 好好说话/夸它会减分，时间放久了也会自然淡忘。
+prank:
+  enabled: true
+  # 记仇值上限
+  max-score: 30
+  # 命中一次骂人词加多少分
+  insult-points: 3
+  # 夸它/道歉一次减多少分（写负数）
+  praise-points: -1
+  # 模型判定"他刚才在骂我"时最多额外加多少分（在同一次 API 调用里判定，不额外花钱）
+  ai-anger-points: 2
+  # 每小时自然淡忘多少分
+  decay-per-hour: 2
+  # 记仇值 → 等级 1 / 2 / 3 的门槛
+  tiers: [3, 8, 15]
+  # 各等级在"不调用 AI 的公屏搞怪"里触发真实捉弄的概率（对应 0~3 级）
+  action-chance: [0.0, 0.25, 0.55, 0.85]
+  # 被骂之后隔多久反击（秒，取区间内随机值）
+  retaliate-delay-seconds: [3, 12]
+  # 同一个人被大捉弄（闪电/苦力怕）的冷却（秒）
+  cooldown-seconds: 45
+  # 惊吓的冷却（秒）
+  jumpscare-cooldown-seconds: 20
+  # 它认得的骂人词（只在 @ 它 / /mcbot ask 的消息里检测，不翻普通聊天）
+  insult-words:
+    - "傻逼"
+    - "傻子"
+    - "弱智"
+    - "蠢"
+    - "废物"
+    - "垃圾"
+    - "闭嘴"
+    - "滚"
+    - "烦人"
+    - "恶心"
+    - "讨厌"
+    - "有病"
+    - "神经病"
+    - "狗东西"
+    - "妈的"
+    - "去死"
+  # 夸它/道歉的词，会减记仇值
+  praise-words:
+    - "谢谢"
+    - "厉害"
+    - "牛"
+    - "喜欢你"
+    - "对不起"
+    - "抱歉"
+    - "可爱"
+    - "好玩"
+    - "有意思"
+    - "辛苦了"
+
+  # 吓一跳：贴脸音效 + 屏幕闪字，不掉血
+  jumpscare:
+    enabled: true
+    min-tier: 1
+    sounds:
+      - "entity.enderman.scream"
+      - "entity.ghast.scream"
+      - "ambient.cave"
+    titles:
+      - "别回头"
+      - "你后面有东西"
+      - "找到你了"
+
+  # 闪电：默认真掉血、可致死，但不点火（想烧方块把 set-fire 改成 true）
+  lightning:
+    enabled: true
+    min-tier: 2
+    real-damage: true
+    # 各等级伤害（0、1 级用不到；5 = 2.5 颗心，8 = 4 颗心）
+    damage: [0.0, 0.0, 5.0, 8.0]
+    # 允许劈死人（false 时最多打到剩 min-health 点血）
+    lethal: true
+    min-health: 2.0
+    # false = 只打闪 + 手动扣血，绝不点火/烧方块；true = 原版闪电，会点火
+    set-fire: false
+
+  # 苦力怕：生成在玩家身后并锁定他
+  creeper:
+    enabled: true
+    min-tier: 2
+    # 各等级生成几只
+    amount: [0, 0, 1, 2]
+    # 生成在玩家身后几格
+    distance: 3.0
+    # 爆炸半径（原版苦力怕为 3）
+    explosion-radius: 3
+    # 允许炸掉方块（true = 真·苦力怕；false = 只炸人不炸地形）
+    break-blocks: true
+    # 允许炸死人（false 时爆炸伤害封顶 max-damage）
+    lethal: true
+    max-damage: 6.0
+    # 多少秒后自动消失（0 = 不自动清理）
+    despawn-seconds: 30
+
 # 只有被 @ 才回复 —— 这是省钱的关键：其余聊天完全不检测、不调用 API
 mention:
   triggers:
