@@ -12,7 +12,7 @@
 ## 安装
 
 1. 编译：`powershell -File build.ps1`（首次先跑 `node tools\fetch-libs.cjs` 下载编译依赖）
-2. 把 `dist\theghost-1.5.1.jar` 放进服务器的 `plugins\` 目录
+2. 把 `dist\theghost-1.5.2.jar` 放进服务器的 `plugins\` 目录
 3. 启动或重启服务器，会生成 `plugins\TheGhost\config.yml`
 4. 在配置里填 `deepseek.api-key`，然后 `/ghost reload`（或重启）
 
@@ -26,9 +26,10 @@
 | `/ghost poke [玩家]` | `theghost.admin` | 立刻让它去找某个玩家的麻烦（调试用） |
 | `/ghost grudge [玩家] [set <分>\|reset]` | `theghost.admin` | 查看记仇榜 / 某个玩家的记仇值，可手动改分或清零 |
 | `/ghost prank <玩家> [lightning\|creeper\|jumpscare]` | `theghost.admin` | 手动试一次真捉弄（不限等级和冷却） |
+| `/ghost forget [玩家]` | `theghost.admin` | 清空某个玩家（或所有人）的对话记忆 |
 | `/ghost toggle` | `theghost.admin` | 暂停/恢复定时搞怪 |
-| `/ghost reload` | `theghost.admin` | 重载配置（改完 API Key 用这个） |
-| `/ghost status` | 所有人 | 查看当前状态 |
+| `/ghost reload` | `theghost.admin` | 重载配置（改完 API Key 用这个；顺带清空对话记忆） |
+| `/ghost status` | 所有人 | 查看当前状态、记忆与累计 token 用量 |
 | `/ghost test [内容]` | `theghost.admin` | 直接打一次 API，结果写进控制台，用来排查连通性 |
 
 玩家在聊天里 `@yl` 或 `@幽灵` 它才会回话。其余聊天它完全不看——这是省钱的关键。
@@ -45,6 +46,31 @@
 
 **只有 @ 才回复**：除了上面两种情形，其余聊天一律不检测、不调用 API。所以日常开销只来自
 公屏骚扰（且受 `bot.ai-chance` 控制）和玩家主动 @。
+
+## 对话记忆（v1.5.2 新增）
+
+它会记得刚才聊了什么——但只记 **8 轮**、只记 **5 分钟**，而且是**每个玩家各记一份**：
+
+- 被 `@yl` 或被 `/ghost ask` 时，之前几轮对话会作为 `user` / `assistant` 消息一起发过去，
+  所以「刚才那句什么意思」「那你再说一遍」这类追问它接得住了
+- 定时搞怪、`/ghost poke`、引导接话的内容**不进记忆**——只有玩家直接跟它说话才算「聊过」
+- 超过 `memory.idle-seconds`（默认 300 秒）没说话就忘掉，玩家下线立刻忘；
+  所以闲聊结束后的第一次 @ 仍然是全新的对话
+- `/ghost forget [玩家]` 可以随时手动清空
+- 重启服务器会清空（记忆只在内存里，不落盘——这是有意的，避免旧对话拖慢它的人设）
+
+**为什么加了记忆几乎不涨钱**：请求的消息形状固定成「system → 历史 → 本次消息」，
+每轮都在上一轮的前缀后面追加，DeepSeek 的输入前缀缓存就能命中，
+而命中价（0.02 元/百万）只有未命中价（1 元/百万）的 1/50。按 8 轮算：
+
+| 场景 | 输入 token | 单次成本 | 相对现状 |
+| --- | --- | --- | --- |
+| 无记忆（1.5.1） | 约 700 | 0.00030 元 | — |
+| 8 轮记忆（缓存命中） | 约 1180 | 0.00031 元 | **+4%** |
+| 8 轮记忆（缓存全不命中，最坏） | 约 1180 | 0.00050 元 | +67% |
+
+真正的成本大头是**输出**（缓存命中时占单次成本约 66%），所以 `max-tokens` 比上下文更值得抠。
+`/ghost status` 会显示累计的命中/未命中/输出 token 与估算花费，可以对账。
 
 ## 记仇与真捉弄（v1.4.0 新增）
 
@@ -96,14 +122,21 @@ fill/setblock/summon/gamemode/reload/plugman/execute` 这类指令永远不会�
   设成 0 就是公屏完全免费。被 @ 或 `/mcbot ask` 时一定走 API，不受这个值影响。
 - `mention.triggers`：能唤起它的 @ 词，默认 `@yl` 和 `@幽灵`。
 - `guide.use-ai`：引导那句话是否也用 AI 生成，默认 false（固定文案，不花钱）。
-- `deepseek.max-tokens`（默认 180）：单次回复上限。它说的话本来就短，不用给多。
+- `deepseek.max-tokens`（默认 **80**）：单次回复上限。回复本体（一句话 + `ACTION` + `ANGER`）约 60 token，
+  80 够用；**输出 token 是账单大头，调大它最费钱**。
+- `deepseek.thinking`（默认 **false**）：思考模式。开着的话 `temperature` 失效、思维链还会白烧
+  输出 token（容易被 `max-tokens` 截断导致回复为空）。它要的是嘴贫，不是推理，别开。
+- `deepseek.log-usage`（默认 false）：每次调用往控制台写一行「输入命中 / 未命中 / 输出」。
+- `memory.enabled` / `memory.max-turns`（8）/ `memory.idle-seconds`（300）/ `memory.max-tokens`（500）：
+  对话记忆的开关与上限。**关掉它（`enabled: false`）就退回 1.5.1 的一次性问答**。
 - `bot.reply-cooldown-seconds` / `mention.cooldown-seconds`：冷却，防止刷屏和连续烧 token。
 - `prank.*`：记仇与捉弄的总开关和数值都在这里。`prank.enabled: false` 可一键关掉全部真捉弄
   （它退回只动嘴的版本，记仇账本仍在记，方便以后观察）。
 - `prank.insult-words` / `prank.praise-words`：它认得的骂人词和夸人词；只在 `@` 它的消息里检测。
-- 玩家用 `/mcbot ask` 的调用是没有概率过滤的，一定走 AI。
+- 玩家用 `/ghost ask` 的调用是没有概率过滤的，一定走 AI。
 
 按默认配置，一个 5 人在线的服务器一天大概几十次调用，成本可以忽略。
+带上 8 轮记忆后每天多花几分钱（按 300 次调用算：约 0.09 元/天 → 0.094 元/天）。
 
 ## 提示词
 
@@ -119,22 +152,30 @@ fill/setblock/summon/gamemode/reload/plugman/execute` 这类指令永远不会�
   `prank.lightning.lethal` / `prank.creeper.break-blocks` 改掉，或在 `prank.enabled: false` 一键关闭。
 - 苦力怕是在玩家身后找落脚点生成的；如果附近全是水/岩浆/墙，它会放弃这次生成（返回 `no-space`）。
 - `grudge.yml` 只按 UUID 记账，玩家改名不会丢；但手动删这个文件等于把账本清了。
+- 对话记忆只在内存里，**重启服务器/插件就没了**。要持久化得自己落盘（现在的取舍是：
+  短时会话够用，且旧对话不会污染它的人设）。
+- 记忆按玩家隔离，但它不会记住「别人」说过什么——`@` 时只能看到自己那一条时间线。
+- 记忆相关的日志里，`/ghost status` 的估算花费按 **deepseek-flash 空闲时段价** 折算；
+  高峰时段（北京时间周一至周五 9:00–12:00、14:00–18:00）实际价格翻倍。
 
 ## 文件结构
 
 ```
-mcbot\
+repo\
 ├─ build.ps1              编译脚本
-├─ config.yml             默认配置（打包进 jar，首次启动释放到 plugins\McBot\）
+├─ config.yml             默认配置（打包进 jar，首次启动释放到 plugins\TheGhost\）
 ├─ plugin.yml             插件描述
 ├─ src\mcbot\             Java 源码
 │   ├─ McBot.java         主类：配置、定时搞怪、聊天触发、指令
-│   ├─ DeepSeek.java      API 客户端（异步）
+│   ├─ DeepSeek.java      API 客户端（异步、带 token 用量）
 │   ├─ Brain.java         提示词构造与回复解析
+│   ├─ History.java       按玩家的短期对话记忆（环形缓冲 + 空闲过期）
 │   ├─ Actions.java       动作执行：音效/标题/指令 + 闪电/苦力怕/惊吓
 │   ├─ Grudge.java        每个玩家的记仇账本（加分、减分、自然淡忘）
 │   └─ Json.java          极小 JSON 读写（不引入外部依赖）
-├─ tools\fetch-libs.cjs   下载编译依赖
+├─ tools\
+│   ├─ fetch-libs.cjs     下载编译依赖
+│   └─ selftest\          离线自测（记忆、请求体形状、用量解析、回复解析）
 └─ lib\                   编译依赖（paper-api、adventure）
 ```
 

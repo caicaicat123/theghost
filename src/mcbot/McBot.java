@@ -16,6 +16,7 @@ import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -30,6 +31,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 /**
@@ -48,6 +50,16 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     private final Map<UUID, Long> lastBigPrank = new HashMap<>();
     private final Map<UUID, Long> lastJumpscare = new HashMap<>();
     private final Set<UUID> prankCreepers = new HashSet<>();
+
+    /** 短期对话记忆：只有玩家直接跟它说话（被 @ 或 /ghost ask）才会用到。 */
+    private final History history = new History();
+
+    /** 累计 token 用量，用来核对真实开销（缓存命中率才是成本的关键）。 */
+    private final AtomicLong usageCalls = new AtomicLong();
+    private final AtomicLong usageHit = new AtomicLong();
+    private final AtomicLong usageMiss = new AtomicLong();
+    private final AtomicLong usageOut = new AtomicLong();
+    private boolean logUsage;
 
     private DeepSeek ai;
     private Grudge grudge;
@@ -138,7 +150,8 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         }
         startLoop();
         getLogger().info("幽灵已就位。AI=" + (ai.configured() ? "开启" : "未配置，仅使用本地台词")
-                + "，记仇系统=" + (prankEnabled ? "开启" : "关闭"));
+                + "，记仇系统=" + (prankEnabled ? "开启" : "关闭")
+                + "，对话记忆=" + (history.enabled() ? history.maxTurns() + " 轮" : "关闭"));
         checkConnectivity();
     }
 
@@ -202,11 +215,20 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         ai = new DeepSeek(
                 cfg.getString("deepseek.api-key", ""),
                 cfg.getString("deepseek.base-url", "https://api.deepseek.com"),
-                cfg.getString("deepseek.model", "deepseek-chat"),
+                cfg.getString("deepseek.model", "deepseek-flash"),
                 cfg.getDouble("deepseek.temperature", 1.35),
-                cfg.getInt("deepseek.max-tokens", 180),
+                cfg.getInt("deepseek.max-tokens", 80),
                 cfg.getInt("deepseek.timeout-seconds", 25),
-                Math.max(1, cfg.getInt("deepseek.retries", 1) + 1));
+                Math.max(1, cfg.getInt("deepseek.retries", 1) + 1),
+                cfg.getBoolean("deepseek.thinking", false));
+        logUsage = cfg.getBoolean("deepseek.log-usage", false);
+
+        // ---- 对话记忆 ----
+        history.configure(
+                cfg.getBoolean("memory.enabled", true),
+                cfg.getInt("memory.max-turns", 8),
+                cfg.getInt("memory.idle-seconds", 300),
+                cfg.getInt("memory.max-tokens", 500));
 
         colorPrefix = cfg.getString("bot.color-prefix", "§5[幽灵]§r ");
         aiChance = cfg.getDouble("bot.ai-chance", 0.55);
@@ -406,29 +428,39 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     }
 
     /**
-     * @param trackAnger true 时把模型判定的 ANGER 分数记进账本（只有玩家直接对它说话才开）。
+     * @param trackAnger true 时把模型判定的 ANGER 分数记进账本（只有玩家直接对它说话才开）；
+     *                   同时也代表「这是一次真正的对话」——只有这种调用才读写短期记忆，
+     *                   免得定时搞怪、管理员 poke 的台词混进玩家和它的聊天记录里。
      */
     private void speak(Player target, String trigger, boolean quiet, boolean forceAi, boolean trackAnger) {
         if (!isEnabled()) {
             return;
         }
         int tier = tierOf(target);
+        UUID id = target == null ? null : target.getUniqueId();
+        boolean conversational = trackAnger && id != null;
+        List<History.Turn> remembered = conversational ? history.recall(id) : List.of();
         if (ai != null && ai.configured() && (forceAi || random.nextDouble() < aiChance)) {
             String system = Brain.systemPrompt(this, allowedSounds, allowedCommands, tier);
             String user = Brain.userPrompt(trigger, context(target));
-            ai.chat(system, user).whenComplete((raw, error) -> {
+            ai.chat(system, user, History.toMessages(remembered)).whenComplete((result, error) -> {
                 Brain.Reply reply;
                 if (error != null) {
                     getLogger().warning("DeepSeek 调用失败: " + error.getMessage());
                     reply = Brain.local(lines, allowedSounds, random);
                 } else {
-                    reply = Brain.parse(raw);
+                    noteUsage(result, trigger);
+                    reply = Brain.parse(result.content());
                     if (reply.say().isBlank()) {
                         Brain.Reply fallback = Brain.local(lines, allowedSounds, random);
                         reply = new Brain.Reply(fallback.say(), reply.actionType(), reply.actionValue(), reply.anger());
                     }
                     if (trackAnger && target != null && reply.anger() > 0) {
                         applyAiAnger(target, reply.anger());
+                    }
+                    // 只记成功过的真实回复；失败/兜底不进记忆，省得它"记得"自己没说过的话
+                    if (conversational && !reply.say().isBlank()) {
+                        history.remember(id, trigger, reply.say());
                     }
                 }
                 deliver(reply, target, quiet);
@@ -472,6 +504,21 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 getLogger().info("动作: " + result + (online != null ? " -> " + online.getName() : ""));
             }
         });
+    }
+
+    /** 累计一次调用的 token 用量；开了 log-usage 就顺手写一行控制台。 */
+    private void noteUsage(DeepSeek.Result result, String trigger) {
+        usageCalls.incrementAndGet();
+        usageHit.addAndGet(result.cacheHitTokens());
+        usageMiss.addAndGet(result.cacheMissTokens());
+        usageOut.addAndGet(result.outputTokens());
+        if (logUsage) {
+            String label = trigger == null ? "" : trigger.replace('\n', ' ').replace('\r', ' ');
+            if (label.length() > 40) {
+                label = label.substring(0, 40) + "…";
+            }
+            getLogger().info("DeepSeek 用量（" + result.usageLine() + "）：" + label);
+        }
     }
 
     private String context(Player target) {
@@ -613,6 +660,14 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         // 3) 其余聊天一律不处理：不检测、不调用 API，也就没有开销
     }
 
+    /** 人走了就把这段对话忘掉：记忆只服务于「连着聊几句」，顺便防止几个 Map 随 UUID 无限增长。 */
+    @EventHandler
+    public void onQuit(PlayerQuitEvent event) {
+        UUID id = event.getPlayer().getUniqueId();
+        history.forget(id);
+        lastReply.remove(id);
+    }
+
     // -------------------------------------------------------- 苦力怕善后
 
     /** 不是幽灵放的苦力怕不碰；配置说不炸方块时只清方块列表，伤害照旧。 */
@@ -647,7 +702,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
             sender.sendMessage(colorize("§5[幽灵]§r /ghost ask <内容> · poke [玩家] · grudge [玩家] · "
-                    + "prank <玩家> <动作> · toggle · reload · status · test"));
+                    + "prank <玩家> <动作> · forget [玩家] · toggle · reload · status · test"));
             return true;
         }
         switch (args[0].toLowerCase(Locale.ROOT)) {
@@ -799,14 +854,34 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 mischiefEnabled = !mischiefEnabled;
                 sender.sendMessage(colorize("§7幽灵的搞怪开关：" + (mischiefEnabled ? "开" : "关")));
             }
+            case "forget" -> {
+                if (!hasAdmin(sender)) {
+                    sender.sendMessage("§c需要 theghost.admin 权限。");
+                    return true;
+                }
+                if (args.length >= 2) {
+                    Player target = Bukkit.getPlayerExact(args[1]);
+                    if (target == null) {
+                        sender.sendMessage(colorize("§c找不到在线的玩家 " + args[1] + "。"));
+                        return true;
+                    }
+                    history.forget(target.getUniqueId());
+                    sender.sendMessage(colorize("§7已经让幽灵忘掉和 " + target.getName() + " 的对话。"));
+                } else {
+                    history.clear();
+                    sender.sendMessage(colorize("§7已经让幽灵忘掉所有人的对话。"));
+                }
+            }
             case "reload" -> {
                 if (!hasAdmin(sender)) {
                     sender.sendMessage("§c需要 theghost.admin 权限。");
                     return true;
                 }
                 loadSettings();
+                history.clear();
                 startLoop();
-                sender.sendMessage(colorize("§7配置已重载。AI=" + (ai.configured() ? "开启" : "未配置")));
+                sender.sendMessage(colorize("§7配置已重载。AI=" + (ai.configured() ? "开启" : "未配置")
+                        + "，对话记忆已清空"));
             }
             case "status" -> {
                 sender.sendMessage(colorize("§5幽灵§r 状态："));
@@ -825,6 +900,14 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                         + (creeperBreakBlocks ? "（会炸方块）" : "（不炸方块）"));
                 sender.sendMessage("§7 音效 " + allowedSounds.size() + " 个；指令白名单："
                         + String.join(", ", allowedCommands));
+                sender.sendMessage("§7 记忆：" + (history.enabled() ? "开" : "关")
+                        + "（" + history.maxTurns() + " 轮 / 空闲 " + history.idleSeconds() + " 秒 / 上限 "
+                        + history.maxTokens() + " token）  正在记 " + history.tracked() + " 人");
+                sender.sendMessage("§7 用量：" + usageCalls.get() + " 次调用；"
+                        + "输入命中 " + usageHit.get() + " / 未命中 " + usageMiss.get()
+                        + " / 输出 " + usageOut.get() + " token");
+                sender.sendMessage("§7 估算花费：§f" + String.format(Locale.ROOT, "%.4f", estimatedCost())
+                        + " 元§7（按 " + ai.model() + " 空闲时段价：命中 0.02 / 未命中 1 / 输出 4 元每百万 token）");
             }
             case "test" -> {
                 if (!hasAdmin(sender)) {
@@ -843,17 +926,20 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 getLogger().info("[测试] 开始调用 DeepSeek：" + text);
                 ai.chat(Brain.systemPrompt(this, allowedSounds, allowedCommands, 0),
                         Brain.userPrompt("管理员正在做连通性测试，对他说：" + text, "（测试场景）"))
-                        .whenComplete((raw, error) -> {
+                        .whenComplete((result, error) -> {
                             long ms = System.currentTimeMillis() - started;
                             if (error != null) {
                                 getLogger().warning("[测试] 调用失败（" + ms + "ms）：" + error);
                             } else {
+                                noteUsage(result, text);
                                 getLogger().info("[测试] 调用成功（" + ms + "ms）："
-                                        + raw.replace("\r", " ").replace("\n", " | "));
+                                        + result.content().replace("\r", " ").replace("\n", " | ")
+                                        + "  [" + result.usageLine() + "]");
                             }
                         });
             }
-            default -> sender.sendMessage(colorize("§c未知子命令。用法：/ghost ask|poke|grudge|prank|toggle|reload|status|test"));
+            default -> sender.sendMessage(colorize("§c未知子命令。用法：/ghost "
+                    + "ask|poke|grudge|prank|forget|toggle|reload|status|test"));
         }
         return true;
     }
@@ -861,9 +947,11 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return filter(List.of("ask", "poke", "grudge", "prank", "toggle", "reload", "status", "test"), args[0]);
+            return filter(List.of("ask", "poke", "grudge", "prank", "forget", "toggle", "reload", "status", "test"),
+                    args[0]);
         }
-        if (args.length == 2 && (args[0].equalsIgnoreCase("grudge") || args[0].equalsIgnoreCase("prank"))) {
+        if (args.length == 2 && (args[0].equalsIgnoreCase("grudge") || args[0].equalsIgnoreCase("prank")
+                || args[0].equalsIgnoreCase("forget"))) {
             return filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).collect(Collectors.toList()), args[1]);
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("grudge")) {
@@ -878,6 +966,11 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     private static List<String> filter(List<String> options, String prefix) {
         String lower = prefix.toLowerCase(Locale.ROOT);
         return options.stream().filter(s -> s.toLowerCase(Locale.ROOT).startsWith(lower)).collect(Collectors.toList());
+    }
+
+    /** 按 deepseek-flash 空闲时段单价估算累计花费（高峰时段翻倍）。 */
+    private double estimatedCost() {
+        return (usageHit.get() * 0.02 + usageMiss.get() * 1.0 + usageOut.get() * 4.0) / 1_000_000.0;
     }
 
     private String allowedPranks(int tier) {
