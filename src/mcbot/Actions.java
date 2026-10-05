@@ -10,8 +10,8 @@ import org.bukkit.entity.Creeper;
 import org.bukkit.entity.Player;
 import org.bukkit.util.Vector;
 
-import java.util.List;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Random;
 import java.util.Set;
@@ -19,8 +19,12 @@ import java.util.Set;
 /**
  * 动作执行。模型只能触发白名单内的动作，危险指令在此被硬拦截。
  *
- * 捉弄类动作（JUMPSCARE / LIGHTNING / CREEPER）还要过两道闸：
- * 该玩家的记仇等级够不够、同一个人是不是刚被整过。
+ * <p>真动作（GIFT / JUNK / JUMPSCARE / LIGHTNING / CREEPER）要过四道闸：
+ * ① 这个玩家是否豁免（OP / theghost.immune 权限 / 副本世界）；
+ * ② 心情档位够不够；③ 冷却与每日上限；④ 击杀还要额外过「先警告后杀」和击杀冷却。
+ *
+ * <p>**物品一律走 Bukkit API（{@link Rewards}），`give` 永远留在硬拦截名单里**，
+ * 所以模型写不出 `@a`、写不出数量，也写不出 NBT。
  */
 public final class Actions {
 
@@ -34,16 +38,32 @@ public final class Actions {
             "fill", "setblock", "clone", "summon", "gamemode", "difficulty", "worldborder", "gamerule",
             "save-off", "save-all", "datapack", "function", "recipe", "advancement", "spreadplayers",
             "forceload", "bukkit:reload", "minecraft:stop", "paper", "spark", "plugins",
-            "version", "seed", "debug", "jfr", "perf", "mspt", "tps"));
+            "version", "seed", "debug", "jfr", "perf", "mspt", "tps",
+            // 能绕开物品白名单的后门（loot 能刷战利品表、item/data 能改 NBT、xp 是白给经验）
+            "loot", "item", "data", "xp", "experience", "enchant", "damage", "attribute", "effect"));
+
+    /** 需要过「豁免 + 档位 + 冷却」的真动作。 */
+    private static final Set<String> REAL_ACTIONS = new LinkedHashSet<>(
+            List.of("GIFT", "JUNK", "JUMPSCARE", "LIGHTNING", "CREEPER"));
 
     private Actions() {
     }
 
     public static String run(McBot plugin, Brain.Reply reply, Player target) {
-        return run(plugin, reply, target, 0);
+        return run(plugin, reply, target, 0, 0);
     }
 
+    /** @deprecated 用带两个档位的版本；这个只是给"管理员手动测试"用的（档位拉满）。 */
+    @Deprecated
     public static String run(McBot plugin, Brain.Reply reply, Player target, int tier) {
+        return run(plugin, reply, target, tier, tier);
+    }
+
+    /**
+     * @param angerTier 生气档 0-3（心情越低越高），决定捉弄类动作放不放行
+     * @param joyTier   开心档 0-3（心情越高越高），决定礼物档位
+     */
+    public static String run(McBot plugin, Brain.Reply reply, Player target, int angerTier, int joyTier) {
         if (!reply.hasAction()) {
             return "none";
         }
@@ -56,9 +76,16 @@ public final class Actions {
             type = "SOUND";
             value = raw;
         }
-        // 音效/标题/指令必须带参数；闪电、苦力怕、惊吓本来就是无参数的
+        // 音效/标题/指令必须带参数；闪电、苦力怕、惊吓、礼物、垃圾本来就是无参数的
         if (value.isEmpty() && (type.equals("SOUND") || type.equals("TITLE") || type.equals("COMMAND"))) {
             return "empty";
+        }
+        // 豁免只挡"真动作"，不挡它说话/放音效——被免疫的玩家仍然能逗它
+        if (REAL_ACTIONS.contains(type)) {
+            String exempt = plugin.exemptReason(target);
+            if (exempt != null) {
+                return "exempt:" + exempt;
+            }
         }
         try {
             switch (type) {
@@ -81,14 +108,20 @@ public final class Actions {
                     target.sendTitle(plugin.colorize("§d" + text), plugin.colorize("§7—— 幽灵"), 8, 45, 12);
                     return "title";
                 }
+                case "GIFT" -> {
+                    return gift(plugin, target, joyTier);
+                }
+                case "JUNK" -> {
+                    return junk(plugin, target, angerTier);
+                }
                 case "JUMPSCARE" -> {
-                    return jumpscare(plugin, target, tier);
+                    return jumpscare(plugin, target, angerTier);
                 }
                 case "LIGHTNING" -> {
-                    return lightning(plugin, target, tier);
+                    return lightning(plugin, target, angerTier);
                 }
                 case "CREEPER" -> {
-                    return creeper(plugin, target, tier);
+                    return creeper(plugin, target, angerTier);
                 }
                 case "COMMAND" -> {
                     if (!plugin.commandsEnabled()) {
@@ -118,14 +151,55 @@ public final class Actions {
         }
     }
 
+    // ------------------------------------------------------------ 礼物与垃圾
+
+    /** 给玩家一份礼物：物品与数量由 {@link Rewards} 按开心档从白名单里抽。 */
+    private static String gift(McBot plugin, Player target, int joyTier) {
+        if (!plugin.prankEnabled() || !plugin.giftEnabled() || target == null || !target.isOnline()) {
+            return "denied";
+        }
+        if (joyTier < plugin.rewardMinJoyTier()) {
+            return "mood-not-happy-enough";
+        }
+        String tier = plugin.giftTierKey(joyTier);
+        boolean big = "big".equals(tier);
+        if (!plugin.tryUseGift(target, big)) {
+            return "gift-quota";
+        }
+        String got = plugin.rewards().give(target, tier, plugin.random());
+        if (got == null) {
+            return "no-gift"; // 该档位白名单是空的（配置问题，启动时已经警告过）
+        }
+        plugin.getLogger().info("送礼: " + target.getName() + " <- " + tier + " " + got);
+        return "gift:" + tier + ":" + got;
+    }
+
+    /** 往背包空位里塞垃圾。 */
+    private static String junk(McBot plugin, Player target, int angerTier) {
+        if (!plugin.prankEnabled() || !plugin.junkEnabled() || target == null || !target.isOnline()) {
+            return "denied";
+        }
+        if (angerTier < plugin.junkMinAngerTier()) {
+            return "mood-not-angry-enough";
+        }
+        if (!plugin.tryUseJunk(target)) {
+            return "junk-quota";
+        }
+        String put = plugin.rewards().junk(target, plugin.junkSlots(), plugin.random());
+        if (put == null) {
+            return "junk-no-space"; // 背包满了：宁可什么都不做，也不覆盖玩家自己的东西
+        }
+        return "junk:" + put;
+    }
+
     // ------------------------------------------------------------ 真·捉弄
 
     /** 贴脸一声响 + 屏幕闪字，不掉血，用来吓人。 */
-    private static String jumpscare(McBot plugin, Player target, int tier) {
+    private static String jumpscare(McBot plugin, Player target, int angerTier) {
         if (!plugin.prankEnabled() || !plugin.jumpscareEnabled() || target == null || !target.isOnline()) {
             return "denied";
         }
-        if (tier < plugin.jumpscareMinTier()) {
+        if (angerTier < plugin.jumpscareMinTier()) {
             return "tier-too-low";
         }
         if (!plugin.tryUseJumpscare(target)) {
@@ -147,20 +221,23 @@ public final class Actions {
     /**
      * 在玩家头上劈闪电。
      *
-     * 不开 set-fire 时用 strikeLightningEffect（只打闪）+ 手动闪电伤害，
+     * <p>不开 set-fire 时用 strikeLightningEffect（只打闪）+ 手动闪电伤害，
      * 这样能劈死人、能不劈死人，也不会把他家点了。
+     *
+     * <p>会劈死人的那一下要额外过两道保险：**第一次只警告（留一口气）**，
+     * 警告窗口内再来才真杀；真杀还有自己的冷却（默认 10 分钟）。
      */
-    private static String lightning(McBot plugin, Player target, int tier) {
+    private static String lightning(McBot plugin, Player target, int angerTier) {
         if (!plugin.prankEnabled() || !plugin.lightningEnabled() || target == null || !target.isOnline()) {
             return "denied";
         }
-        if (tier < plugin.lightningMinTier()) {
+        if (angerTier < plugin.lightningMinTier()) {
             return "tier-too-low";
         }
         if (!plugin.tryUseBigPrank(target)) {
             return "prank-cooldown";
         }
-        double damage = plugin.lightningDamage(tier);
+        double damage = plugin.lightningDamage(angerTier);
         boolean real = plugin.lightningRealDamage() && damage > 0;
         Location loc = target.getLocation();
         World world = loc.getWorld();
@@ -176,29 +253,47 @@ public final class Actions {
         if (!real) {
             return "lightning-effect";
         }
+
+        double health = target.getHealth();
         double applied = damage;
-        if (!plugin.lightningLethal()) {
-            double lowest = Math.max(0.0, target.getHealth() - plugin.lightningMinHealth());
+        boolean lethal = damage >= health - 0.001;
+        String result = "lightning";
+        if (lethal) {
+            if (plugin.lightningWarnFirst() && !plugin.consumeWarning(target)) {
+                // 第一次只警告：留一口气，把话说明白
+                applied = Math.max(0.0, health - plugin.lightningWarnLeaveHealth());
+                target.sendMessage(plugin.colorize(
+                        "§5幽灵§r：§c我记住你了。下一次，就不会只留你一口气。"));
+                result = "lightning-warned";
+            } else if (!plugin.tryUseKill(target)) {
+                applied = Math.max(0.0, health - plugin.lightningMinHealth());
+                result = "lightning-kill-cooldown";
+            } else {
+                target.sendMessage(plugin.colorize("§5幽灵§r：§4我说过我会记住的。"));
+                result = "lightning-kill";
+            }
+        } else if (!plugin.lightningLethal()) {
+            double lowest = Math.max(0.0, health - plugin.lightningMinHealth());
             applied = Math.min(applied, lowest);
         }
         if (applied > 0) {
             target.damage(applied, DamageSource.builder(DamageType.LIGHTNING_BOLT).build());
         }
-        return "lightning:" + String.format(Locale.ROOT, "%.1f", applied);
+        return result + ":" + String.format(Locale.ROOT, "%.1f", applied);
     }
 
     /** 在玩家身后放苦力怕，锁定他。 */
-    private static String creeper(McBot plugin, Player target, int tier) {
+    private static String creeper(McBot plugin, Player target, int angerTier) {
         if (!plugin.prankEnabled() || !plugin.creeperEnabled() || target == null || !target.isOnline()) {
             return "denied";
         }
-        if (tier < plugin.creeperMinTier()) {
+        if (angerTier < plugin.creeperMinTier()) {
             return "tier-too-low";
         }
         if (!plugin.tryUseBigPrank(target)) {
             return "prank-cooldown";
         }
-        int amount = plugin.creeperAmount(tier);
+        int amount = plugin.creeperAmount(angerTier);
         int spawned = 0;
         for (int i = 0; i < amount; i++) {
             Location spot = spawnSpot(target, plugin.creeperDistance());

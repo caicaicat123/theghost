@@ -45,14 +45,32 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     /** 打在苦力怕身上的标记，用来认出「这是幽灵放的」，善后时也只清自己放的。 */
     public static final String PRANK_META = "theghost_prank";
 
+    /** 有这个权限的玩家完全免疫：不会被送礼，也不会被整（仍然能逗它说话）。 */
+    public static final String EXEMPT_PERMISSION = "theghost.immune";
+
     private final Random random = new Random();
     private final Map<UUID, Long> lastReply = new HashMap<>();
     private final Map<UUID, Long> lastBigPrank = new HashMap<>();
     private final Map<UUID, Long> lastJumpscare = new HashMap<>();
     private final Set<UUID> prankCreepers = new HashSet<>();
 
+    /** 礼物/垃圾的冷却与"每人每天"配额（滑动 24 小时窗口）。 */
+    private final Map<UUID, Long> lastGift = new HashMap<>();
+    private final Map<UUID, Long> lastBigGift = new HashMap<>();
+    private final Map<UUID, Long> lastJunk = new HashMap<>();
+    private final Map<UUID, Quota> giftQuota = new HashMap<>();
+    private final Map<UUID, Quota> bigGiftQuota = new HashMap<>();
+    private final Map<UUID, Quota> junkQuota = new HashMap<>();
+
+    /** 击杀冷却，以及"先警告后杀"的窗口。 */
+    private final Map<UUID, Long> lastKill = new HashMap<>();
+    private final Map<UUID, Long> warnedUntil = new HashMap<>();
+
     /** 短期对话记忆：只有玩家直接跟它说话（被 @ 或 /ghost ask）才会用到。 */
     private final History history = new History();
+
+    /** 物品白名单（礼物/垃圾都由这里出，模型碰不到）。 */
+    private final Rewards rewards = new Rewards();
 
     /** 累计 token 用量，用来核对真实开销（缓存命中率才是成本的关键）。 */
     private final AtomicLong usageCalls = new AtomicLong();
@@ -62,7 +80,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     private boolean logUsage;
 
     private DeepSeek ai;
-    private Grudge grudge;
+    private Mood mood;
     private BukkitTask loopTask;
     private BukkitTask decayTask;
     private int countdown;
@@ -97,13 +115,39 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     private String colorPrefix;
 
     private boolean prankEnabled;
-    private int grudgeMaxScore;
     private int insultPoints;
     private int praisePoints;
     private boolean fallbackWords;
-    private int grudgeDecayPerHour;
 
-    private int[] grudgeTiers = {3, 8, 15};
+    // ---- 心情与档位 ----
+    private int moodNeutral;
+    private int moodMax;
+    private int moodDefault;
+    private int moodDecayPerHour;
+    private int[] angerTiers = {20, 14, 8};
+    private int[] joyTiers = {30, 36, 43};
+
+    // ---- 礼物 / 垃圾 ----
+    private boolean giftEnabled;
+    private boolean junkEnabled;
+    private int rewardMinJoyTier;
+    private int giftCooldownSeconds;
+    private int giftDailyCap;
+    private int bigGiftCooldownSeconds;
+    private int bigGiftDailyCap;
+    private int junkMinAngerTier;
+    private int junkCooldownSeconds;
+    private int junkDailyCap;
+    private int junkSlots;
+
+    // ---- 豁免与保命 ----
+    private boolean exemptOps;
+    private List<String> exemptWorldPrefixes = List.of();
+    private boolean killWarnFirst;
+    private double killWarnLeaveHealth;
+    private int killWarnWindowSeconds;
+    private int killCooldownSeconds;
+
     private double[] actionChance = {0.0, 0.25, 0.55, 0.85};
     private int retaliateMinSeconds;
     private int retaliateMaxSeconds;
@@ -140,8 +184,15 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         saveDefaultConfig();
         loadSettings();
 
-        grudge = new Grudge(new File(getDataFolder(), "grudge.yml"));
-        grudge.load();
+        mood = new Mood(new File(getDataFolder(), "mood.yml"));
+        mood.setDefault(moodDefault);
+        mood.load();
+        if (!new File(getDataFolder(), "mood.yml").isFile()
+                && new File(getDataFolder(), "grudge.yml").isFile()) {
+            getLogger().info("检测到旧的 grudge.yml：心情值和记仇值不是一套算法（中性点从 0 变成 "
+                    + moodNeutral + "），所以没有迁移——全体从 " + moodDefault + " 开始，旧文件留在原处当备份。");
+        }
+        rewards.logProblems(getLogger());
         startDecayTask();
 
         getServer().getPluginManager().registerEvents(this, this);
@@ -151,8 +202,12 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         }
         startLoop();
         getLogger().info("幽灵已就位。AI=" + (ai.configured() ? "开启" : "未配置，仅使用本地台词")
-                + "，记仇系统=" + (prankEnabled ? "开启" : "关闭")
-                + "，对话记忆=" + (history.enabled() ? history.maxTurns() + " 轮" : "关闭"));
+                + "，心情系统=" + (prankEnabled ? "开启" : "关闭")
+                + "（" + moodNeutral + " 平常心 / 上限 " + moodMax
+                + "，生气档 " + join(angerTiers) + "，开心档 " + join(joyTiers) + "）"
+                + "，礼物=" + (giftEnabled ? "开" : "关") + "，垃圾=" + (junkEnabled ? "开" : "关")
+                + "，对话记忆=" + (history.enabled() ? history.maxTurns() + " 轮" : "关闭")
+                + "，物品白名单=" + rewards.tableCount() + " 份 / 垃圾 " + rewards.junkCount() + " 种");
         checkConnectivity();
     }
 
@@ -190,8 +245,8 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
             }
         }
         prankCreepers.clear();
-        if (grudge != null) {
-            grudge.save();
+        if (mood != null) {
+            mood.save();
         }
     }
 
@@ -199,10 +254,10 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         if (decayTask != null) {
             decayTask.cancel();
         }
-        // 每 5 分钟结算一次自然淡忘，顺手把账本落盘
+        // 每 5 分钟结算一次"心情回归中性"，顺手把账本落盘
         decayTask = getServer().getScheduler().runTaskTimer(this, () -> {
-            if (grudge != null) {
-                grudge.decayAll(grudgeDecayPerHour, grudgeMaxScore);
+            if (mood != null) {
+                mood.driftAll(moodDecayPerHour, moodNeutral, moodMax);
             }
         }, 6000L, 6000L);
     }
@@ -269,15 +324,41 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
             lines = List.of("……", "有人吗。");
         }
 
-        // ---- 记仇与捉弄 ----
+        // ---- 心情（一套值：0-50，25 是平常心）----
+        moodNeutral = Math.max(1, cfg.getInt("mood.neutral", 25));
+        moodMax = Math.max(moodNeutral + 1, cfg.getInt("mood.max", 50));
+        moodDefault = Math.max(0, Math.min(moodMax, cfg.getInt("mood.default", moodNeutral)));
+        moodDecayPerHour = Math.max(0, cfg.getInt("mood.decay-per-hour", 2));
+        angerTiers = toIntArray(cfg.getIntegerList("mood.anger-tiers"), new int[]{20, 14, 8});
+        joyTiers = toIntArray(cfg.getIntegerList("mood.joy-tiers"), new int[]{30, 36, 43});
+
+        // ---- 礼物 / 垃圾 ----
+        giftEnabled = cfg.getBoolean("reward.enabled", true);
+        junkEnabled = cfg.getBoolean("junk.enabled", true);
+        rewardMinJoyTier = Math.max(1, cfg.getInt("reward.min-joy-tier", 1));
+        giftCooldownSeconds = Math.max(0, cfg.getInt("reward.cooldown-seconds", 900));
+        giftDailyCap = Math.max(0, cfg.getInt("reward.daily-cap", 3));
+        bigGiftCooldownSeconds = Math.max(0, cfg.getInt("reward.big-cooldown-seconds", 86400));
+        bigGiftDailyCap = Math.max(0, cfg.getInt("reward.big-daily-cap", 1));
+        junkMinAngerTier = Math.max(1, cfg.getInt("junk.min-anger-tier", 1));
+        junkCooldownSeconds = Math.max(0, cfg.getInt("junk.cooldown-seconds", 120));
+        junkDailyCap = Math.max(0, cfg.getInt("junk.daily-cap", 8));
+        junkSlots = Math.max(1, Math.min(9, cfg.getInt("junk.slots", 3)));
+
+        // ---- 豁免与保命 ----
+        exemptOps = cfg.getBoolean("prank.exempt-ops", true);
+        exemptWorldPrefixes = lowerList(cfg.getStringList("prank.exempt-world-prefixes"));
+        killWarnFirst = cfg.getBoolean("prank.lightning.warn-first", true);
+        killWarnLeaveHealth = Math.max(0.5, cfg.getDouble("prank.lightning.warn-leave-health", 2.0));
+        killWarnWindowSeconds = Math.max(10, cfg.getInt("prank.lightning.warn-window-seconds", 600));
+        killCooldownSeconds = Math.max(0, cfg.getInt("prank.kill-cooldown-seconds", 600));
+
+        // ---- 捉弄 ----
         prankEnabled = cfg.getBoolean("prank.enabled", true);
-        grudgeMaxScore = Math.max(1, cfg.getInt("prank.max-score", 50));
-        // 骂人/道歉不再靠词表判定：这些分只作为「模型不在场」时的兜底（见 fallbackWords）
-        insultPoints = Math.max(0, cfg.getInt("prank.insult-points", 3));
-        praisePoints = Math.min(0, cfg.getInt("prank.praise-points", -1));
+        // 词表只在模型不在场时兜底；注意正负：现在是心情值，骂人要让心情**下降**
+        insultPoints = Math.min(0, cfg.getInt("prank.insult-points", -3));
+        praisePoints = Math.max(0, cfg.getInt("prank.praise-points", 1));
         fallbackWords = cfg.getBoolean("prank.fallback-words", true);
-        grudgeDecayPerHour = Math.max(0, cfg.getInt("prank.decay-per-hour", 2));
-        grudgeTiers = toIntArray(cfg.getIntegerList("prank.tiers"), new int[]{3, 8, 15});
         actionChance = toDoubleArray(cfg.getDoubleList("prank.action-chance"),
                 new double[]{0.0, 0.25, 0.55, 0.85});
         int[] delay = toIntArray(cfg.getIntegerList("prank.retaliate-delay-seconds"), new int[]{3, 12});
@@ -325,6 +406,9 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         creeperLethal = cfg.getBoolean("prank.creeper.lethal", true);
         creeperMaxDamage = Math.max(0.0, cfg.getDouble("prank.creeper.max-damage", 6.0));
         creeperDespawnSeconds = Math.max(0, cfg.getInt("prank.creeper.despawn-seconds", 30));
+
+        // 物品白名单也在这里重载：否则 /ghost reload 改了 reward.items 也不会生效
+        rewards.load(giftTables(), junkTable());
     }
 
     private static int[] toIntArray(List<Integer> list, int[] fallback) {
@@ -396,30 +480,34 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     private List<Player> eligiblePlayers() {
         List<Player> list = new ArrayList<>();
         for (Player p : Bukkit.getOnlinePlayers()) {
-            if (p.isOnline() && (targetOps || !p.isOp())) {
+            if (p.isOnline() && (targetOps || !p.isOp()) && exemptReason(p) == null) {
                 list.add(p);
             }
         }
         return list;
     }
 
-    /** 记仇的人更容易被它盯上：权重 = 1 + 记仇值。 */
+    /** 心情越差的人越容易被它盯上：权重 = 1 + (中性值 − 心情值)。 */
     private Player pickTarget(List<Player> pool) {
-        if (!prankEnabled || grudge == null) {
+        if (!prankEnabled || mood == null) {
             return pool.get(random.nextInt(pool.size()));
         }
         double total = 0;
         for (Player p : pool) {
-            total += 1 + grudge.score(p.getUniqueId(), grudgeDecayPerHour);
+            total += weightOf(p);
         }
         double roll = random.nextDouble() * total;
         for (Player p : pool) {
-            roll -= 1 + grudge.score(p.getUniqueId(), grudgeDecayPerHour);
+            roll -= weightOf(p);
             if (roll <= 0) {
                 return p;
             }
         }
         return pool.get(pool.size() - 1);
+    }
+
+    private double weightOf(Player player) {
+        return Math.max(1, 1 + (moodNeutral - mood.score(player.getUniqueId(), moodDecayPerHour, moodNeutral)));
     }
 
     // -------------------------------------------------------------- AI 交互
@@ -445,12 +533,12 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         if (!isEnabled()) {
             return;
         }
-        int tier = tierOf(target);
+        Brain.MoodInfo moodInfo = moodOf(target);
         UUID id = target == null ? null : target.getUniqueId();
         boolean conversational = trackAnger && id != null;
         List<History.Turn> remembered = conversational ? history.recall(id) : List.of();
         if (ai != null && ai.configured() && (forceAi || random.nextDouble() < aiChance)) {
-            String system = Brain.systemPrompt(this, allowedSounds, allowedCommands, tier, grudgeMaxScore);
+            String system = Brain.systemPrompt(this, allowedSounds, allowedCommands, moodInfo);
             String user = Brain.userPrompt(trigger, context(target));
             ai.chat(system, user, History.toMessages(remembered)).whenComplete((result, error) -> {
                 Brain.Reply reply;
@@ -468,7 +556,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                         reply = new Brain.Reply(fallback.say(), reply.actionType(), reply.actionValue(), reply.score());
                     }
                     if (trackAnger) {
-                        // 记仇值加多少、减多少，全听模型的这一行 SCORE；账本自己会夹在 0~上限之间
+                        // 心情涨多少、掉多少，全听模型的这一行 SCORE；账本自己会夹在 0~上限之间
                         bump(target, reply.score());
                     }
                     // 只记成功过的真实回复；失败/兜底不进记忆，省得它"记得"自己没说过的话
@@ -484,13 +572,14 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 bump(target, fallbackDelta);
             }
             Brain.Reply reply = Brain.local(lines, allowedSounds, random);
-            if (prankEnabled && target != null && tier > 0) {
-                int idx = Math.min(actionChance.length - 1, tier);
+            int angerTier = moodOf(target).angerTier();
+            if (prankEnabled && target != null && angerTier > 0) {
+                int idx = Math.min(actionChance.length - 1, angerTier);
                 if (random.nextDouble() < actionChance[idx]) {
-                    Brain.Reply extra = Brain.localPrank(tier, random,
-                            jumpscareEnabled && tier >= jumpscareMinTier,
-                            lightningEnabled && tier >= lightningMinTier,
-                            creeperEnabled && tier >= creeperMinTier);
+                    Brain.Reply extra = Brain.localPrank(angerTier, random,
+                            jumpscareEnabled && angerTier >= jumpscareMinTier,
+                            lightningEnabled && angerTier >= lightningMinTier,
+                            creeperEnabled && angerTier >= creeperMinTier);
                     if (extra.hasAction()) {
                         reply = new Brain.Reply(reply.say(), extra.actionType(), extra.actionValue(), 0);
                     }
@@ -516,7 +605,8 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                     Bukkit.broadcastMessage(message);
                 }
             }
-            String result = Actions.run(this, reply, online, tierOf(online));
+            Brain.MoodInfo info = moodOf(online);
+            String result = Actions.run(this, reply, online, info.angerTier(), info.joyTier());
             if (!"none".equals(result) && !"denied".equals(result)) {
                 getLogger().info("动作: " + result + (online != null ? " -> " + online.getName() : ""));
             }
@@ -548,23 +638,18 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 + "世界 " + world + "，" + phase + "，" + weather;
     }
 
-    // -------------------------------------------------------------- 记仇账本
+    // ----------------------------------------------------------- 心情账本
 
-    private int tierOf(Player player) {
-        if (player == null || grudge == null) {
-            return 0;
-        }
-        return tierOf(grudge.score(player.getUniqueId(), grudgeDecayPerHour));
+    /** 某个玩家现在的心情快照（值 + 门槛 → 生气档 / 开心档）。 */
+    private Brain.MoodInfo moodOf(Player player) {
+        int value = player == null || mood == null
+                ? moodNeutral
+                : mood.score(player.getUniqueId(), moodDecayPerHour, moodNeutral);
+        return new Brain.MoodInfo(value, moodNeutral, moodMax, angerTiers, joyTiers);
     }
 
-    private int tierOf(int score) {
-        int tier = 0;
-        for (int i = 0; i < grudgeTiers.length && i < 3; i++) {
-            if (score >= grudgeTiers[i]) {
-                tier = i + 1;
-            }
-        }
-        return tier;
+    private Brain.MoodInfo moodOf(int value) {
+        return new Brain.MoodInfo(value, moodNeutral, moodMax, angerTiers, joyTiers);
     }
 
     /** 词表兜底分：只在模型这条路走不通时才用（`prank.fallback-words` 可整个关掉）。 */
@@ -575,18 +660,22 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         return Brain.wordDelta(message, insultWords, praiseWords, insultPoints, praisePoints);
     }
 
+    /** 心情变化：正=开心、负=生气。 */
     private void bump(Player player, int delta) {
-        if (player == null || grudge == null || delta == 0) {
+        if (player == null || mood == null || delta == 0) {
             return;
         }
-        int before = tierOf(player);
-        int score = grudge.add(player.getUniqueId(), player.getName(), delta, grudgeDecayPerHour, grudgeMaxScore);
-        int after = tierOf(score);
-        if (delta > 0 && after != before) {
-            getLogger().info(player.getName() + " 的记仇值到 " + score + "（等级 " + after + "）");
+        Brain.MoodInfo before = moodOf(player);
+        int score = mood.add(player.getUniqueId(), player.getName(), delta,
+                moodDecayPerHour, moodNeutral, moodMax);
+        Brain.MoodInfo after = moodOf(score);
+        if (delta != 0 && (after.angerTier() != before.angerTier() || after.joyTier() != before.joyTier())) {
+            getLogger().info(player.getName() + " 的心情到 " + score + "（生气档 " + after.angerTier()
+                    + " / 开心档 " + after.joyTier() + "）");
         }
-        if (delta > 0 && after >= 2) {
-            maybeRetaliate(player, after);
+        // 只有"变得更生气"才会招来报复，哄好它是不会挨劈的
+        if (delta < 0 && after.angerTier() >= 2) {
+            maybeRetaliate(player, after.angerTier());
         }
     }
 
@@ -605,7 +694,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
             if (online == null || !online.isOnline()) {
                 return;
             }
-            int nowTier = tierOf(online);
+            int nowTier = moodOf(online).angerTier();
             Brain.Reply prank = Brain.localPrank(nowTier, random,
                     jumpscareEnabled && nowTier >= jumpscareMinTier,
                     lightningEnabled && nowTier >= lightningMinTier,
@@ -636,7 +725,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 return;
             }
             lastReply.put(player.getUniqueId(), now);
-            // 记仇值怎么变交给模型的 SCORE 行；词表分只是模型不可用时的兜底
+            // 心情怎么变交给模型的 SCORE 行；词表分只是模型不可用时的兜底
             speak(player, player.getName() + " 用 @ 对你说了：" + message,
                     false, true, true, fallbackDelta(message));
             return;
@@ -698,8 +787,8 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage(colorize("§5[幽灵]§r /ghost ask <内容> · poke [玩家] · grudge [玩家] · "
-                    + "prank <玩家> <动作> · forget [玩家] · toggle · reload · status · test"));
+            sender.sendMessage(colorize("§5[幽灵]§r /ghost ask <内容> · poke [玩家] · mood [玩家] · "
+                    + "prank <玩家> <动作> · gift|junk <玩家> · forget [玩家] · toggle · reload · status · test"));
             return true;
         }
         switch (args[0].toLowerCase(Locale.ROOT)) {
@@ -745,24 +834,32 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 sender.sendMessage(colorize("§7正在让幽灵去找 " + target.getName() + " ……"));
                 speak(target, "被管理员推了一把，去找点乐子", false, false);
             }
-            case "grudge" -> {
+            case "grudge", "mood" -> {
                 if (!hasAdmin(sender)) {
                     sender.sendMessage("§c需要 theghost.admin 权限。");
                     return true;
                 }
-                if (grudge == null) {
-                    sender.sendMessage(colorize("§c记仇系统还没初始化。"));
+                if (mood == null) {
+                    sender.sendMessage(colorize("§c心情系统还没初始化。"));
                     return true;
                 }
                 if (args.length == 1) {
-                    sender.sendMessage(colorize("§5幽灵的记仇榜§r（最多 10 人）："));
-                    List<Grudge.Entry> top = grudge.top(10);
-                    if (top.isEmpty()) {
-                        sender.sendMessage("§7  没人骂过它，账本是空的。");
+                    sender.sendMessage(colorize("§5幽灵的心情榜§r（平常心 " + moodNeutral + "）"));
+                    sender.sendMessage("§7  最烦的：");
+                    List<Mood.Entry> angry = mood.angriest(5, moodNeutral);
+                    if (angry.isEmpty()) {
+                        sender.sendMessage("§7    没有人生它的气。");
                     }
-                    for (Grudge.Entry entry : top) {
-                        sender.sendMessage("§7  " + entry.name() + "：" + entry.score()
-                                + " 分（等级 " + tierOf(entry.score()) + "）");
+                    for (Mood.Entry entry : angry) {
+                        sender.sendMessage("§7    " + entry.name() + "：" + entry.score());
+                    }
+                    sender.sendMessage("§7  最待见的：");
+                    List<Mood.Entry> happy = mood.happiest(5, moodNeutral);
+                    if (happy.isEmpty()) {
+                        sender.sendMessage("§7    还没人被它待见。");
+                    }
+                    for (Mood.Entry entry : happy) {
+                        sender.sendMessage("§7    " + entry.name() + "：" + entry.score());
                     }
                     return true;
                 }
@@ -779,18 +876,46 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                         sender.sendMessage(colorize("§c分数要写数字。"));
                         return true;
                     }
-                    grudge.set(target.getUniqueId(), target.getName(), value, grudgeMaxScore);
-                    sender.sendMessage(colorize("§7" + target.getName() + " 的记仇值已设为 "
-                            + Math.max(0, Math.min(grudgeMaxScore, value)) + "。"));
+                    mood.set(target.getUniqueId(), target.getName(), value, moodMax);
+                    sender.sendMessage(colorize("§7" + target.getName() + " 的心情已设为 "
+                            + Math.max(0, Math.min(moodMax, value)) + "。"));
                 } else if (args.length >= 3 && args[2].equalsIgnoreCase("reset")) {
-                    grudge.reset(target.getUniqueId());
-                    sender.sendMessage(colorize("§7已把 " + target.getName() + " 的账本撕了。"));
+                    mood.reset(target.getUniqueId());
+                    sender.sendMessage(colorize("§7已把 " + target.getName() + " 的心情重置为平常心。"));
                 } else {
-                    int score = grudge.score(target.getUniqueId(), grudgeDecayPerHour);
-                    int tier = tierOf(score);
-                    sender.sendMessage(colorize("§7" + target.getName() + "：记仇值 " + score + " / "
-                            + grudgeMaxScore + "，等级 " + tier + "，能用的捉弄：" + allowedPranks(tier)));
+                    Brain.MoodInfo info = moodOf(target);
+                    sender.sendMessage(colorize("§7" + target.getName() + "：心情 " + info.value()
+                            + " / " + moodMax + "（" + info.moodWord() + "）"
+                            + "  生气档 " + info.angerTier() + " / 开心档 " + info.joyTier()));
+                    sender.sendMessage("§7  能用的捉弄：" + allowedPranks(info.angerTier())
+                            + "  礼物档位：" + (info.joyTier() >= rewardMinJoyTier()
+                                ? giftTierKey(info.joyTier()) : "心情不够（要 ≥" + joyTiers[0] + "）"));
                 }
+            }
+            case "gift", "junk" -> {
+                if (!hasAdmin(sender)) {
+                    sender.sendMessage("§c需要 theghost.admin 权限。");
+                    return true;
+                }
+                if (args.length < 2) {
+                    sender.sendMessage(colorize("§c用法：/ghost " + args[0].toLowerCase(Locale.ROOT) + " <玩家>"));
+                    return true;
+                }
+                Player target = Bukkit.getPlayerExact(args[1]);
+                if (target == null) {
+                    sender.sendMessage(colorize("§c找不到在线的玩家 " + args[1] + "。"));
+                    return true;
+                }
+                // 管理员手动测试：档位拉满（礼物给 big、垃圾当最生气），清掉配额，但豁免照旧生效
+                boolean isGift = args[0].equalsIgnoreCase("gift");
+                String action = isGift ? "GIFT" : "JUNK";
+                clearRewardCooldowns(target);
+                String result = isGift
+                        ? Actions.run(this, new Brain.Reply("", action, "", 0), target, 0, 3)
+                        : Actions.run(this, new Brain.Reply("", action, "", 0), target, 3, 0);
+                sender.sendMessage(colorize("§7对 " + target.getName() + " 执行 " + action + " → " + result));
+                getLogger().info("[手动" + action + "] " + sender.getName() + " -> "
+                        + target.getName() + " (" + result + ")");
             }
             case "prank" -> {
                 if (!hasAdmin(sender)) {
@@ -798,7 +923,8 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                     return true;
                 }
                 if (args.length < 2) {
-                    sender.sendMessage(colorize("§c用法：/ghost prank <玩家> [lightning|creeper|jumpscare]"));
+                    sender.sendMessage(colorize("§c用法：/ghost prank <玩家> [lightning|creeper|jumpscare]"
+                            + "（送礼/塞垃圾用 /ghost gift|junk <玩家>）"));
                     return true;
                 }
                 Player target = Bukkit.getPlayerExact(args[1]);
@@ -828,10 +954,10 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                     sender.sendMessage(colorize("§c动作只能是 lightning / creeper / jumpscare。"));
                     return true;
                 }
-                // 管理员手动测试不受记仇等级和冷却限制，方便调参
+                // 管理员手动测试不受心情档位和冷却限制，方便调参（豁免照旧生效）
                 lastBigPrank.remove(target.getUniqueId());
                 lastJumpscare.remove(target.getUniqueId());
-                String result = Actions.run(this, new Brain.Reply("", action, "", 0), target, 3);
+                String result = Actions.run(this, new Brain.Reply("", action, "", 0), target, 3, 3);
                 sender.sendMessage(colorize("§7对 " + target.getName() + " 执行 " + action + " → " + result));
                 getLogger().info("[手动捉弄] " + sender.getName() + " -> " + target.getName()
                         + " " + action + " (" + result + ")");
@@ -880,22 +1006,37 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                         + "  AI：" + (ai.configured() ? "已配置" : "未配置"));
                 sender.sendMessage("§7 只有被 " + String.join(" / ", mentionTriggers) + " 才回复；"
                         + "引导窗口 " + guideWindowSeconds + " 秒");
-                sender.sendMessage("§7 记仇：" + (prankEnabled ? "开" : "关")
-                        + "  上限 " + grudgeMaxScore + "  等级线 "
-                        + grudgeTiers[0] + "/" + grudgeTiers[1] + "/" + grudgeTiers[2]
-                        + "  淡忘 " + grudgeDecayPerHour + " 分/小时");
+                sender.sendMessage("§7 心情：" + (prankEnabled ? "开" : "关")
+                        + "  平常心 " + moodNeutral + " / 上限 " + moodMax
+                        + "  生气档 ≤" + join(angerTiers) + "  开心档 ≥" + join(joyTiers)
+                        + "  回归 " + moodDecayPerHour + " 分/小时");
                 sender.sendMessage("§7 判分：由 AI 自己给（SCORE " + Brain.SCORE_MIN + " ~ +" + Brain.SCORE_MAX
-                        + "，正=记仇、负=消气）"
+                        + "，正=让它开心、负=惹它生气）"
                         + (fallbackWords
-                            ? "；词表仅在模型不可用时兜底（骂 +" + insultPoints + " / 夸 " + praisePoints + "）"
+                            ? "；词表仅在模型不可用时兜底（骂 " + insultPoints + " / 夸 +" + praisePoints + "）"
                             : "；词表兜底已关闭"));
+                sender.sendMessage("§7 礼物：" + (giftEnabled ? "开" : "关")
+                        + "（心情 ≥" + joyTiers[Math.min(joyTiers.length - 1, rewardMinJoyTier - 1)]
+                        + " 才给；小礼物冷却 " + giftCooldownSeconds + " 秒/上限 " + giftDailyCap
+                        + " 次每天；钻石档冷却 " + bigGiftCooldownSeconds + " 秒/上限 " + bigGiftDailyCap + " 次每天）"
+                        + "  物品表 " + rewards.tableCount() + " 份");
+                sender.sendMessage("§7 垃圾：" + (junkEnabled ? "开" : "关")
+                        + "（心情 ≤" + angerTiers[Math.min(angerTiers.length - 1, junkMinAngerTier - 1)]
+                        + " 才塞；塞 " + junkSlots + " 格；冷却 " + junkCooldownSeconds
+                        + " 秒/上限 " + junkDailyCap + " 次每天）  垃圾表 " + rewards.junkCount() + " 种");
+                sender.sendMessage("§7 豁免：OP " + (exemptOps ? "免疫" : "不免疫")
+                        + " · 权限 theghost.immune" + " · 世界前缀 "
+                        + (exemptWorldPrefixes.isEmpty() ? "无" : String.join("/", exemptWorldPrefixes))
+                        + "  击杀冷却 " + killCooldownSeconds + " 秒"
+                        + (killWarnFirst ? "（先警告：留 " + killWarnLeaveHealth + " 血，"
+                            + killWarnWindowSeconds + " 秒内再来才真杀）" : "（不警告，直接杀）"));
                 sender.sendMessage("§7 捉弄：惊吓" + (jumpscareEnabled ? "开" : "关")
                         + " · 闪电" + (lightningEnabled ? "开" : "关")
                         + (lightningRealDamage ? "（真伤害" + (lightningLethal ? "·可致死" : "") + "）" : "（仅特效）")
                         + " · 苦力怕" + (creeperEnabled ? "开" : "关")
                         + (creeperBreakBlocks ? "（会炸方块）" : "（不炸方块）"));
-                sender.sendMessage("§7 音效 " + allowedSounds.size() + " 个；指令白名单："
-                        + String.join(", ", allowedCommands));
+                sender.sendMessage("§7 音效 " + allowedSounds.size() + " 个；指令白名单（"
+                        + allowedCommands.size() + " 项）：" + String.join(", ", allowedCommands));
                 sender.sendMessage("§7 记忆：" + (history.enabled() ? "开" : "关")
                         + "（" + history.maxTurns() + " 轮 / 空闲 " + history.idleSeconds() + " 秒 / 上限 "
                         + history.maxTokens() + " token）  正在记 " + history.tracked() + " 人");
@@ -920,7 +1061,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 sender.sendMessage(colorize("§7正在测试 DeepSeek 连通性……"));
                 long started = System.currentTimeMillis();
                 getLogger().info("[测试] 开始调用 DeepSeek：" + text);
-                ai.chat(Brain.systemPrompt(this, allowedSounds, allowedCommands, 0, grudgeMaxScore),
+                ai.chat(Brain.systemPrompt(this, allowedSounds, allowedCommands, moodOf(moodNeutral)),
                         Brain.userPrompt("管理员正在做连通性测试，对他说：" + text, "（测试场景）"))
                         .whenComplete((result, error) -> {
                             long ms = System.currentTimeMillis() - started;
@@ -935,7 +1076,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                         });
             }
             default -> sender.sendMessage(colorize("§c未知子命令。用法：/ghost "
-                    + "ask|poke|grudge|prank|forget|toggle|reload|status|test"));
+                    + "ask|poke|mood|prank|gift|junk|forget|toggle|reload|status|test"));
         }
         return true;
     }
@@ -943,14 +1084,15 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return filter(List.of("ask", "poke", "grudge", "prank", "forget", "toggle", "reload", "status", "test"),
-                    args[0]);
+            return filter(List.of("ask", "poke", "mood", "prank", "gift", "junk", "forget",
+                    "toggle", "reload", "status", "test"), args[0]);
         }
-        if (args.length == 2 && (args[0].equalsIgnoreCase("grudge") || args[0].equalsIgnoreCase("prank")
-                || args[0].equalsIgnoreCase("forget"))) {
+        if (args.length == 2 && (args[0].equalsIgnoreCase("mood") || args[0].equalsIgnoreCase("grudge")
+                || args[0].equalsIgnoreCase("prank") || args[0].equalsIgnoreCase("gift")
+                || args[0].equalsIgnoreCase("junk") || args[0].equalsIgnoreCase("forget"))) {
             return filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).collect(Collectors.toList()), args[1]);
         }
-        if (args.length == 3 && args[0].equalsIgnoreCase("grudge")) {
+        if (args.length == 3 && (args[0].equalsIgnoreCase("mood") || args[0].equalsIgnoreCase("grudge"))) {
             return filter(List.of("set", "reset"), args[2]);
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("prank")) {
@@ -980,7 +1122,163 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         if (creeperEnabled && tier >= creeperMinTier) {
             list.add("CREEPER");
         }
+        if (junkEnabled && tier >= junkMinAngerTier) {
+            list.add("JUNK");
+        }
         return list.isEmpty() ? "只有嘴贫" : String.join("/", list);
+    }
+
+    // ------------------------------------------------- 礼物 / 垃圾的政策
+
+    /** 开心档 → 物品表档位名（配置里 reward.items 的键）。 */
+    public String giftTierKey(int joyTier) {
+        if (joyTier >= 3) {
+            return "big";
+        }
+        return joyTier >= 2 ? "good" : "small";
+    }
+
+    /** 从配置里取出三档物品表。 */
+    private Map<String, List<String>> giftTables() {
+        var cfg = getConfig();
+        Map<String, List<String>> tables = new java.util.LinkedHashMap<>();
+        tables.put("small", cfg.getStringList("reward.items.small"));
+        tables.put("good", cfg.getStringList("reward.items.good"));
+        tables.put("big", cfg.getStringList("reward.items.big"));
+        return tables;
+    }
+
+    private List<String> junkTable() {
+        return getConfig().getStringList("junk.items");
+    }
+
+    /**
+     * 礼物配额：普通礼物和钻石档各有一套冷却 + 每人每天上限。
+     *
+     * @param big true = 钻石档（单独的长时间冷却与更小的每日上限）
+     */
+    public boolean tryUseGift(Player player, boolean big) {
+        if (player == null) {
+            return false;
+        }
+        if (big) {
+            return tryCooldown(lastBigGift, player, bigGiftCooldownSeconds)
+                    && allowQuota(bigGiftQuota, player.getUniqueId(), bigGiftDailyCap);
+        }
+        return tryCooldown(lastGift, player, giftCooldownSeconds)
+                && allowQuota(giftQuota, player.getUniqueId(), giftDailyCap);
+    }
+
+    public boolean tryUseJunk(Player player) {
+        if (player == null) {
+            return false;
+        }
+        return tryCooldown(lastJunk, player, junkCooldownSeconds)
+                && allowQuota(junkQuota, player.getUniqueId(), junkDailyCap);
+    }
+
+    /** 击杀冷却：真正会劈死人的那一下，同一个人默认 10 分钟只能来一次。 */
+    public boolean tryUseKill(Player player) {
+        return tryCooldown(lastKill, player, killCooldownSeconds);
+    }
+
+    /**
+     * 「先警告后杀」：第一次返回 false（并记下警告），警告窗口内再来返回 true（放行真杀）。
+     */
+    public synchronized boolean consumeWarning(Player player) {
+        if (player == null) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        Long until = warnedUntil.get(player.getUniqueId());
+        if (until != null && now <= until) {
+            warnedUntil.remove(player.getUniqueId());
+            return true;
+        }
+        warnedUntil.put(player.getUniqueId(), now + killWarnWindowSeconds * 1000L);
+        return false;
+    }
+
+    /** 管理员手动测试前清掉配额，免得"测试"被冷却挡住。 */
+    public synchronized void clearRewardCooldowns(Player player) {
+        if (player == null) {
+            return;
+        }
+        UUID id = player.getUniqueId();
+        lastGift.remove(id);
+        lastBigGift.remove(id);
+        lastJunk.remove(id);
+        giftQuota.remove(id);
+        bigGiftQuota.remove(id);
+        junkQuota.remove(id);
+    }
+
+    /** 滑动 24 小时窗口内还能不能再给一次。 */
+    private boolean allowQuota(Map<UUID, Quota> map, UUID id, int cap) {
+        if (cap <= 0) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        Quota quota = map.get(id);
+        if (quota == null || now - quota.windowStart > 24L * 3600_000L) {
+            map.put(id, new Quota(now, 1));
+            return true;
+        }
+        if (quota.used >= cap) {
+            return false;
+        }
+        quota.used++;
+        return true;
+    }
+
+    /** 当天已用次数（给状态显示用）。 */
+    private int usedToday(Map<UUID, Quota> map, UUID id) {
+        Quota quota = map.get(id);
+        if (quota == null || System.currentTimeMillis() - quota.windowStart > 24L * 3600_000L) {
+            return 0;
+        }
+        return quota.used;
+    }
+
+    private static final class Quota {
+        private final long windowStart;
+        private int used;
+
+        Quota(long windowStart, int used) {
+            this.windowStart = windowStart;
+            this.used = used;
+        }
+    }
+
+    /**
+     * 这个玩家是不是被豁免了（不该被送礼、也不该被整）。
+     * 豁免只挡"真动作"，它仍然可以对你说话、放音效。
+     */
+    public String exemptReason(Player player) {
+        if (player == null || !player.isOnline()) {
+            return "offline";
+        }
+        if (exemptOps && player.isOp()) {
+            return "op";
+        }
+        if (player.hasPermission(EXEMPT_PERMISSION)) {
+            return "permission";
+        }
+        String world = player.getWorld().getName().toLowerCase(Locale.ROOT);
+        for (String prefix : exemptWorldPrefixes) {
+            if (!prefix.isBlank() && world.startsWith(prefix)) {
+                return "world:" + player.getWorld().getName();
+            }
+        }
+        return null;
+    }
+
+    private static String join(int[] values) {
+        List<String> out = new ArrayList<>(values.length);
+        for (int v : values) {
+            out.add(String.valueOf(v));
+        }
+        return String.join("/", out);
     }
 
     // ---------------------------------------------------------------- 工具
@@ -1004,6 +1302,42 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
 
     public boolean prankEnabled() {
         return prankEnabled;
+    }
+
+    public boolean giftEnabled() {
+        return giftEnabled;
+    }
+
+    public boolean junkEnabled() {
+        return junkEnabled;
+    }
+
+    public int rewardMinJoyTier() {
+        return rewardMinJoyTier;
+    }
+
+    public int junkMinAngerTier() {
+        return junkMinAngerTier;
+    }
+
+    public int junkSlots() {
+        return junkSlots;
+    }
+
+    public boolean lightningWarnFirst() {
+        return killWarnFirst;
+    }
+
+    public double lightningWarnLeaveHealth() {
+        return killWarnLeaveHealth;
+    }
+
+    public Rewards rewards() {
+        return rewards;
+    }
+
+    public Random random() {
+        return random;
     }
 
     public boolean titlesEnabled() {

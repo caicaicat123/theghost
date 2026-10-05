@@ -22,15 +22,16 @@ deepseek:
 # ---- 对话记忆 ----
 # 让它记得刚才聊了什么。只按当前说话的玩家各存一份，形状固定成
 # 「system → 历史 → 本次消息」的追加式前缀，好命中 DeepSeek 的输入缓存
-# （命中 0.02 元/百万，是未命中的 1/50）——所以 8 轮历史几乎不增加开销。
+# （命中 0.02 元/百万，是未命中的 1/50）——所以 20 轮历史几乎不增加开销。
 memory:
   enabled: true
   # 最多记几轮（一轮 = 玩家一句 + 它回的一句）
-  max-turns: 8
-  # 超过这个秒数没说话就忘掉，免得下次 @ 它时接上一个小时前的话题
+  max-turns: 20
+  # 超过这个秒数没说话就忘掉（记忆越长越容易把旧情绪带回来，所以空闲就清）
   idle-seconds: 300
   # 历史整体的 token 上限（按官方口径估算：中文 0.6 / 英文 0.3），超了丢最旧的
-  max-tokens: 500
+  # 20 轮大约 1200 token：这个值必须跟着轮数一起调大，否则轮数配了也白配
+  max-tokens: 1500
 
 bot:
   # 公屏上的说话人前缀，效果是「幽灵：内容」
@@ -57,25 +58,124 @@ mischief:
   # 有多大比例只私聊给某个人看，其余在公屏说
   private-chance: 0.0
 
-# ---- 记仇与捉弄 ----
-# 玩家骂它/道歉 → AI 在回复里给一个带正负的 SCORE（-5 ~ +5）→ 记仇值随之变化；
-# 分数越高它能对你动用越狠的捉弄，也越容易被它点名。时间放久了会自然淡忘。
+# ---- 心情（一套值：0-50，25 是平常心）----
+# 玩家的每句话都会让它对你的心情动一点（AI 在回复里给 SCORE：正=开心、负=生气）：
+#   高于 25 = 待见你 → 有可能塞你一份礼物（心情越高给得越好，最高到钻石装备）
+#   低于 25 = 烦你   → 有可能塞你垃圾、放苦力怕、劈闪电
+#   时间会把它慢慢冲回 25（生气和开心都会被冲淡）
+mood:
+  # 平常心：新玩家、以及"淡忘到底"时的值
+  neutral: 25
+  # 上限（提示词里会把 0-max 和"平常心多少"都告诉模型）
+  max: 50
+  # 新玩家（或账本里没有记录的人）的初始心情；想让它一上来就喜欢你，就写大一点
+  default: 25
+  # 每小时往平常心回归多少分
+  decay-per-hour: 2
+  # 生气档：心情 ≤ 这几个值时，依次是 1 / 2 / 3 档（越往下越狠，用来放行捉弄动作）
+  anger-tiers: [20, 14, 8]
+  # 开心档：心情 ≥ 这几个值时，依次是 1 / 2 / 3 档（越高礼物越好）
+  joy-tiers: [30, 36, 43]
+
+# ---- 礼物（心情好的时候塞给玩家的东西）----
+# 物品**由代码从下面的白名单里随机抽**，模型只能写 ACTION: GIFT，不能指定物品、数量、目标。
+# 走的是服务端 API 而不是 give 指令 —— give 永远在硬拦截名单里，玩家刷不出东西来。
+reward:
+  enabled: true
+  # 心情至少要到几档才允许送礼（1 = joy-tiers 的第一道线，默认 30）
+  min-joy-tier: 1
+  # 普通礼物：同一个人多久能收一次（秒）、每天最多收几次
+  cooldown-seconds: 900
+  daily-cap: 3
+  # 钻石档（big 表）：单独的长时间冷却与每日上限——这是最值钱的一档，别让它被刷
+  big-cooldown-seconds: 86400
+  big-daily-cap: 1
+  items:
+    # 开心档 1：小礼物，日常消耗品
+    small:
+      - "bread:4"
+      - "cooked_beef:4"
+      - "apple:6"
+      - "golden_carrot:4"
+      - "torch:16"
+      - "arrow:32"
+      - "coal:16"
+      - "iron_nugget:16"
+      - "book:2"
+      - "paper:8"
+      - "bone_meal:8"
+      - "string:8"
+      - "leather:4"
+      - "wheat_seeds:8"
+    # 开心档 2：好东西，材料与稀罕物
+    good:
+      - "iron_ingot:8"
+      - "gold_ingot:6"
+      - "redstone:16"
+      - "lapis_lazuli:12"
+      - "emerald:4"
+      - "diamond:2"
+      - "experience_bottle:8"
+      - "ender_pearl:4"
+      - "golden_apple:2"
+      - "cake:1"
+      - "firework_rocket:16"
+      - "name_tag:2"
+      - "saddle:1"
+      - "lead:2"
+    # 开心档 3：钻石装备与最值钱的东西（受 big-cooldown / big-daily-cap 限制）
+    big:
+      - "diamond_sword:1"
+      - "diamond_pickaxe:1"
+      - "diamond_axe:1"
+      - "diamond_shovel:1"
+      - "diamond_helmet:1"
+      - "diamond_chestplate:1"
+      - "diamond_leggings:1"
+      - "diamond_boots:1"
+      - "diamond:8"
+      - "enchanted_golden_apple:1"
+
+# ---- 垃圾（心情差的时候塞进玩家背包的东西）----
+# 只塞**空格子**，绝不覆盖玩家自己的物品；背包满了就什么都不做。
+junk:
+  enabled: true
+  # 心情低到几档才允许塞垃圾（1 = anger-tiers 的第一道线，默认 20）
+  min-anger-tier: 1
+  cooldown-seconds: 120
+  daily-cap: 8
+  # 一次塞几格（不要太狠：塞满背包等于账户级骚扰，2-3 格足够恶心人）
+  slots: 3
+  items:
+    - "rotten_flesh:1"
+    - "poisonous_potato:1"
+    - "dirt:1"
+    - "gravel:1"
+    - "cobblestone:1"
+    - "stick:1"
+    - "dead_bush:1"
+    - "kelp:1"
+    - "bone:1"
+    - "string:1"
+    - "feather:1"
+    - "flint:1"
+    - "wheat_seeds:1"
+    - "spider_eye:1"
+    - "slime_ball:1"
+    - "bowl:1"
+    - "paper:1"
+
+# ---- 捉弄 ----
 prank:
   enabled: true
-  # 记仇值上限（总分）。提示词里会把「满分 50 分」告诉模型，
-  # 上限留得比等级线（3/8/15）高，是为了让 AI 自由判分，也让"记仇越深越容易被盯上"有区分度。
-  max-score: 50
   # 下面两项只在「模型不在场」时才用（没配 API Key，或调用失败）：
-  # 词表命中一次加/减多少分。正常情况下分数完全由 AI 决定，不看词表。
-  insult-points: 3
-  praise-points: -1
+  # 词表命中一次让心情变多少。正常情况完全由 AI 决定，不看词表。
+  # 注意正负：现在是心情值，骂人必须让心情**下降**。
+  insult-points: -3
+  praise-points: 1
   # 词表兜底总开关：true = 模型不可用时按词表判分；false = 彻底不看词表（连兜底也没有）
   fallback-words: true
-  # 每小时自然淡忘多少分
-  decay-per-hour: 2
-  # 记仇值 → 等级 1 / 2 / 3 的门槛
-  tiers: [3, 8, 15]
-  # 各等级在"不调用 AI 的公屏搞怪"里触发真实捉弄的概率（对应 0~3 级）
+  # 各生气档在"不调用 AI 的公屏搞怪"里触发真实捉弄的概率（对应 0~3 档）
   action-chance: [0.0, 0.25, 0.55, 0.85]
   # 被骂之后隔多久反击（秒，取区间内随机值）
   retaliate-delay-seconds: [3, 12]
@@ -83,6 +183,12 @@ prank:
   cooldown-seconds: 45
   # 惊吓的冷却（秒）
   jumpscare-cooldown-seconds: 20
+  # 会劈死人的那一下的冷却（秒）——比普通捉弄长得多
+  kill-cooldown-seconds: 600
+  # 豁免：这些人不会被送礼，也不会被整（它仍然可以对他们说话、放音效）
+  exempt-ops: true
+  # 世界名前缀命中就豁免（副本世界用它挡住：一次副本里被劈死是最气人的）
+  exempt-world-prefixes: ["nwndungeon"]
   # 下面的词表只在模型不可用时兜底（fallback-words: false 就完全不看）
   # 它认得的骂人词（只在 @ 它 / /ghost ask 的消息里检测，不翻普通聊天）
   insult-words:
@@ -102,7 +208,7 @@ prank:
     - "狗东西"
     - "妈的"
     - "去死"
-  # 夸它/道歉的词（同样只在模型不可用时兜底），命中会减记仇值
+  # 夸它/道歉的词（同样只在模型不可用时兜底），命中会让心情回升
   praise-words:
     - "谢谢"
     - "厉害"
@@ -133,13 +239,18 @@ prank:
     enabled: true
     min-tier: 2
     real-damage: true
-    # 各等级伤害（0、1 级用不到；5 = 2.5 颗心，8 = 4 颗心）
+    # 各生气档伤害（0、1 档用不到；5 = 2.5 颗心，8 = 4 颗心）
     damage: [0.0, 0.0, 5.0, 8.0]
     # 允许劈死人（false 时最多打到剩 min-health 点血）
     lethal: true
     min-health: 2.0
     # false = 只打闪 + 手动扣血，绝不点火/烧方块；true = 原版闪电，会点火
     set-fire: false
+    # 会劈死人的那一下：先只警告（留 warn-leave-health 点血 + 说一句话），
+    # warn-window-seconds 秒内再来一次才真杀。false = 不警告、直接杀。
+    warn-first: true
+    warn-leave-health: 2.0
+    warn-window-seconds: 600
 
   # 苦力怕：生成在玩家身后并锁定他
   creeper:
@@ -197,11 +308,17 @@ actions:
   commands:
     # 允许 AI 执行控制台指令（危险指令在代码里还有一层硬拦截）
     enabled: true
+    # 只放"表现类"：能出声、能写字、能改时间天气。
+    # 不要在这里加 give / loot / item / xp / effect / enchant / summon 这类——
+    # 它们要么能刷物品、要么能改 NBT、要么能白给经验，等于把经济送出去；
+    # 给玩家的物品走 reward.items 白名单（代码用 API 发，模型碰不到）。
     allowed:
       - "me"
       - "say"
       - "title"
+      - "tellraw"
       - "playsound"
+      - "particle"
       - "weather"
       - "time"
 

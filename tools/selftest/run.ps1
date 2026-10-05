@@ -19,5 +19,7 @@ $classpath = ((Get-ChildItem "$lib\*.jar" | ForEach-Object { $_.FullName }) + (J
 if ($LASTEXITCODE -ne 0) { throw '自测编译失败' }
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-& "$jdk\java.exe" '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' -cp "$out;$classpath" mcbot.SelfTest
+# theghost.repo 让自测找到 config.yml，顺手校验物品表格式与命令白名单
+& "$jdk\java.exe" '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' "-Dtheghost.repo=$root" `
+    -cp "$out;$classpath" mcbot.SelfTest
 if ($LASTEXITCODE -ne 0) { throw '自测未全部通过' }
