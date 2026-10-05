@@ -12,7 +12,7 @@
 ## 安装
 
 1. 编译：`powershell -File build.ps1`（首次先跑 `node tools\fetch-libs.cjs` 下载编译依赖）
-2. 把 `dist\theghost-1.5.2.jar` 放进服务器的 `plugins\` 目录
+2. 把 `dist\theghost-1.5.3.jar` 放进服务器的 `plugins\` 目录
 3. 启动或重启服务器，会生成 `plugins\TheGhost\config.yml`
 4. 在配置里填 `deepseek.api-key`，然后 `/ghost reload`（或重启）
 
@@ -72,15 +72,21 @@
 真正的成本大头是**输出**（缓存命中时占单次成本约 66%），所以 `max-tokens` 比上下文更值得抠。
 `/ghost status` 会显示累计的命中/未命中/输出 token 与估算花费，可以对账。
 
-## 记仇与真捉弄（v1.4.0 新增）
+## 记仇与真捉弄（v1.4.0 新增，v1.5.3 改为 AI 判分）
 
-它会给每个玩家单独记一笔账（`plugins/TheGhost/grudge.yml`，重启不丢）：
+它会给每个玩家单独记一笔账（`plugins/TheGhost/grudge.yml`，重启不丢）。
+**加多少、减多少，由它自己在回复里判**——输出第三行的 `SCORE` 是带正负的整数：
 
-- 在 `@yl` / `@幽灵` 的消息里骂它 → 加记仇值（默认一次 +3）
-- 夸它、跟它道歉 → 减一点（默认 -1）
+- `SCORE` 正数 = 记仇：`+1` 有点烦，`+3` 明显在骂，`+5` 骂得很凶
+- `SCORE` 负数 = 消气：`-1` 客气了一下，`-2` 真心道歉，`-3` 及以上很难得
+- `SCORE: 0` = 普通聊天、提问、开玩笑
 - 时间会冲淡一切：默认每小时 -2，7 天没动静的零分账本会被清掉
-- **AI 在同一次回复里顺带判断"这话有多冒犯"**（输出里的 `ANGER: 0-5` 行），最多再加 2 分，不额外花钱
 
+这样做的好处是**阴阳话和道歉都判得准**：「你这人真有意思」「你可真行啊」这种，
+以及「对不起啦我错了」——写死的词表永远判不准，模型能读出来。
+（v1.5.3 之前是靠 `prank.insult-words` / `praise-words` 词表命中才加减分的。）
+
+记仇值上限是 **50 分**（`prank.max-score`，也会写进提示词告诉模型），等级线仍是 3 / 8 / 15。
 记仇值决定它能对你动用哪一档手段：
 
 | 记仇值 | 等级 | 它能做什么 |
@@ -89,6 +95,10 @@
 | 3–7 | 1 | `JUMPSCARE`：贴脸音效 + 屏幕闪字，不掉血 |
 | 8–14 | 2 | `LIGHTNING` 闪电（真掉血）、`CREEPER` 身后放苦力怕（真炸） |
 | 15+ | 3 | 闪电更疼（默认 4 颗心）、苦力怕一次两只 |
+
+**词表只作为兜底**：没配 API Key、或调用失败（模型不在场）时，才会退回去看
+`prank.insult-words` / `praise-words`（每命中一次 ±`insult-points` / `praise-points`）。
+模型正常给出 `SCORE` 时一切以它为准。`prank.fallback-words: false` 可以连兜底也关掉。
 
 补充规则：
 
@@ -132,7 +142,11 @@ fill/setblock/summon/gamemode/reload/plugman/execute` 这类指令永远不会�
 - `bot.reply-cooldown-seconds` / `mention.cooldown-seconds`：冷却，防止刷屏和连续烧 token。
 - `prank.*`：记仇与捉弄的总开关和数值都在这里。`prank.enabled: false` 可一键关掉全部真捉弄
   （它退回只动嘴的版本，记仇账本仍在记，方便以后观察）。
-- `prank.insult-words` / `prank.praise-words`：它认得的骂人词和夸人词；只在 `@` 它的消息里检测。
+- `prank.max-score`（默认 **50**）：记仇值上限，会写进提示词告诉模型。
+- `prank.fallback-words`（默认 true）：词表兜底开关。设 false 就是彻底不看词表——
+  此时没配 API Key / 调用失败时**不会有任何记分**。
+- `prank.insult-words` / `prank.praise-words` / `insult-points` / `praise-points`：
+  只在模型不在场时生效的兜底词表与分值。想让 AI 完全说了算，把 `fallback-words` 关掉即可。
 - 玩家用 `/ghost ask` 的调用是没有概率过滤的，一定走 AI。
 
 按默认配置，一个 5 人在线的服务器一天大概几十次调用，成本可以忽略。
@@ -157,6 +171,8 @@ fill/setblock/summon/gamemode/reload/plugman/execute` 这类指令永远不会�
 - 记忆按玩家隔离，但它不会记住「别人」说过什么——`@` 时只能看到自己那一条时间线。
 - 记忆相关的日志里，`/ghost status` 的估算花费按 **deepseek-flash 空闲时段价** 折算；
   高峰时段（北京时间周一至周五 9:00–12:00、14:00–18:00）实际价格翻倍。
+- 记仇值现在**依赖模型把 `SCORE` 行写对**：它要是漏写或写成别的词，这次就按 0 分算
+  （不会误加，也不会去看词表）。`/ghost status` 的判分行会告诉你当前是哪套在起作用。
 
 ## 文件结构
 

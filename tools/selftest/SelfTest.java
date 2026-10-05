@@ -16,6 +16,8 @@ public final class SelfTest {
         requestShape();
         responseParsing();
         replyParsing();
+        wordFallback();
+        promptShape();
 
         System.out.println(failed == 0 ? "\n全部通过" : "\n失败 " + failed + " 项");
         if (failed > 0) {
@@ -153,19 +155,88 @@ public final class SelfTest {
         check("没有 usage 字段时按 0 记", noUsage.outputTokens() == 0 && "hi".equals(noUsage.content()));
     }
 
-    // ---- 6. 回复解析（回归：别把 1.5.1 的行为改坏） ----
+    // ---- 6. 回复解析：SCORE 带正负（正=记仇，负=消气）----
     private static void replyParsing() {
-        Brain.Reply r = Brain.parse("哼，谁啊\nACTION: NONE\nANGER: 1");
+        Brain.Reply r = Brain.parse("哼，谁啊\nACTION: NONE\nSCORE: 3");
         check("台词解析", "哼，谁啊".equals(r.say()));
-        check("ANGER 解析", r.anger() == 1);
+        check("SCORE 正数（记仇）", r.score() == 3);
         check("NONE 不算动作", !r.hasAction());
 
-        Brain.Reply sound = Brain.parse("看好\nACTION: SOUND entity.enderman.stare\nANGER: 0");
+        Brain.Reply sorry = Brain.parse("行吧，原谅你了\nACTION: NONE\nSCORE: -2");
+        check("SCORE 负数（道歉消气）", sorry.score() == -2);
+
+        Brain.Reply plus = Brain.parse("还行\nACTION: NONE\nSCORE: +1");
+        check("显式正号", plus.score() == 1);
+
+        Brain.Reply wideMinus = Brain.parse("对不起啦\nACTION: NONE\nSCORE: －3");
+        check("全角负号", wideMinus.score() == -3);
+
+        Brain.Reply plain = Brain.parse("今天天气不错\nACTION: NONE\nSCORE: 0");
+        check("普通聊天 0 分", plain.score() == 0);
+
+        Brain.Reply chineseKey = Brain.parse("闭嘴\n动作：JUMPSCARE\n分数: 4");
+        check("中文键名也算判分行", chineseKey.score() == 4 && "JUMPSCARE".equals(chineseKey.actionType()));
+
+        Brain.Reply legacy = Brain.parse("你好\nACTION: NONE\nANGER: 5");
+        check("旧的 ANGER 行仍兼容", legacy.score() == 5);
+
+        Brain.Reply clamped = Brain.parse("气死我了\nACTION: NONE\nSCORE: 9");
+        check("超出区间按边界算", clamped.score() == Brain.SCORE_MAX);
+        Brain.Reply clampedDown = Brain.parse("对不起\nACTION: NONE\nSCORE: -9");
+        check("负向也夹住", clampedDown.score() == Brain.SCORE_MIN);
+
+        Brain.Reply doubled = Brain.parse("随便\nSCORE: 0\nSCORE: 4");
+        check("多行时取绝对值最大的", doubled.score() == 4);
+
+        Brain.Reply sound = Brain.parse("看好\nACTION: SOUND entity.enderman.stare\nSCORE: 0");
         check("SOUND 带参数", sound.hasAction() && "SOUND".equals(sound.actionType())
                 && "entity.enderman.stare".equals(sound.actionValue()));
 
         Brain.Reply wide = Brain.parse("走开\n动作：CREEPER\n愤怒: 4");
-        check("全角冒号也能认", "CREEPER".equals(wide.actionType()) && wide.anger() == 4);
+        check("全角冒号也能认", "CREEPER".equals(wide.actionType()) && wide.score() == 4);
+
+        check("null 不炸", Brain.parse(null).score() == 0);
+    }
+
+    // ---- 7. 词表兜底（只在模型不可用时用）----
+    private static void wordFallback() {
+        List<String> insult = List.of("傻逼", "滚", "去死");
+        List<String> praise = List.of("谢谢", "对不起");
+
+        check("骂人词 → 加分", Brain.wordDelta("你是不是傻逼", insult, praise, 3, -1) == 3);
+        check("夸人/道歉 → 减分", Brain.wordDelta("对不起啊", insult, praise, 3, -1) == -1);
+        check("两样都有时按骂人算", Brain.wordDelta("对不起，但你真是个傻逼", insult, praise, 3, -1) == 3);
+        check("普通聊天 → 0", Brain.wordDelta("今天天气不错", insult, praise, 3, -1) == 0);
+        check("大小写/英文词", Brain.wordDelta("SHUT UP", List.of("shut up"), praise, 3, -1) == 3);
+        check("空消息不炸", Brain.wordDelta("", insult, praise, 3, -1) == 0);
+        check("null 不炸", Brain.wordDelta(null, insult, praise, 3, -1) == 0);
+        check("空词表不误判", Brain.wordDelta("随便说说", List.of(), List.of(), 3, -1) == 0);
+    }
+
+    // ---- 8. 提示词：把总分告诉模型、只写 SCORE 不写 ANGERS、动作按等级出现 ----
+    private static void promptShape() {
+        Brain.Caps caps = new Brain.Caps(true, true, 1, true, 2, true, 2);
+        String low = Brain.systemPrompt(caps, List.of("ambient.cave"), List.of("say"), 0, 50);
+        check("提示词里写满分 50", low.contains("满分 50 分"));
+        check("提示词要求 SCORE 而不是 ANGERS", low.contains("SCORE: -5 到 5") && !low.contains("ANGER"));
+        check("提示词说明正=记仇", low.contains("正数 = 他在骂你"));
+        check("提示词说明负=消气", low.contains("负数 = 他在道歉"));
+        check("0 级不放出闪电/苦力怕",
+                !low.contains("ACTION: LIGHTNING") && !low.contains("ACTION: CREEPER"));
+        check("0 级不放出惊吓（min-tier 1）", !low.contains("ACTION: JUMPSCARE"));
+
+        String high = Brain.systemPrompt(caps, List.of("ambient.cave"), List.of("say"), 2, 50);
+        check("2 级放出闪电", high.contains("ACTION: LIGHTNING"));
+        check("2 级放出苦力怕", high.contains("ACTION: CREEPER"));
+        check("2 级放出惊吓", high.contains("ACTION: JUMPSCARE"));
+
+        String off = Brain.systemPrompt(new Brain.Caps(false, true, 1, true, 2, true, 2), List.of(), List.of(), 3, 50);
+        check("prank 关掉时提示词里没有任何真动作",
+                !off.contains("ACTION: LIGHTNING") && !off.contains("ACTION: CREEPER")
+                        && !off.contains("ACTION: JUMPSCARE"));
+
+        check("上限改了提示词跟着改",
+                Brain.systemPrompt(caps, List.of(), List.of(), 0, 30).contains("满分 30 分"));
     }
 
     private static void check(String name, boolean ok) {

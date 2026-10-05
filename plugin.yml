@@ -1,5 +1,5 @@
 name: TheGhost
-version: 1.5.2
+version: 1.5.3
 main: mcbot.McBot
 api-version: '1.21'
 description: 一个住在服务器里的捣蛋鬼 AI「幽灵」：会嘴贫、会记仇、会真的劈你，还聊得下去。

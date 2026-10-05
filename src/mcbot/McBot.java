@@ -100,8 +100,9 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     private int grudgeMaxScore;
     private int insultPoints;
     private int praisePoints;
-    private int aiAngerPoints;
+    private boolean fallbackWords;
     private int grudgeDecayPerHour;
+
     private int[] grudgeTiers = {3, 8, 15};
     private double[] actionChance = {0.0, 0.25, 0.55, 0.85};
     private int retaliateMinSeconds;
@@ -270,10 +271,11 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
 
         // ---- 记仇与捉弄 ----
         prankEnabled = cfg.getBoolean("prank.enabled", true);
-        grudgeMaxScore = Math.max(1, cfg.getInt("prank.max-score", 30));
+        grudgeMaxScore = Math.max(1, cfg.getInt("prank.max-score", 50));
+        // 骂人/道歉不再靠词表判定：这些分只作为「模型不在场」时的兜底（见 fallbackWords）
         insultPoints = Math.max(0, cfg.getInt("prank.insult-points", 3));
         praisePoints = Math.min(0, cfg.getInt("prank.praise-points", -1));
-        aiAngerPoints = Math.max(0, cfg.getInt("prank.ai-anger-points", 2));
+        fallbackWords = cfg.getBoolean("prank.fallback-words", true);
         grudgeDecayPerHour = Math.max(0, cfg.getInt("prank.decay-per-hour", 2));
         grudgeTiers = toIntArray(cfg.getIntegerList("prank.tiers"), new int[]{3, 8, 15});
         actionChance = toDoubleArray(cfg.getDoubleList("prank.action-chance"),
@@ -424,15 +426,22 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
 
     /** @param forceAi true 时跳过概率过滤，一定走 API（被 @ 和玩家主动提问用这个）。 */
     private void speak(Player target, String trigger, boolean quiet, boolean forceAi) {
-        speak(target, trigger, quiet, forceAi, false);
+        speak(target, trigger, quiet, forceAi, false, 0);
+    }
+
+    private void speak(Player target, String trigger, boolean quiet, boolean forceAi, boolean trackAnger) {
+        speak(target, trigger, quiet, forceAi, trackAnger, 0);
     }
 
     /**
-     * @param trackAnger true 时把模型判定的 ANGER 分数记进账本（只有玩家直接对它说话才开）；
-     *                   同时也代表「这是一次真正的对话」——只有这种调用才读写短期记忆，
-     *                   免得定时搞怪、管理员 poke 的台词混进玩家和它的聊天记录里。
+     * @param trackAnger    true 时按模型回复里的 SCORE 记分（只有玩家直接对它说话才开）；
+     *                      同时也代表「这是一次真正的对话」——只有这种调用才读写短期记忆，
+     *                      免得定时搞怪、管理员 poke 的台词混进玩家和它的聊天记录里。
+     * @param fallbackDelta 词表兜底分：**只在模型这条路走不通时**才记（没配 Key / 调用失败）。
+     *                      模型正常给出 SCORE 时一律以模型的判断为准，包括它判 0。
      */
-    private void speak(Player target, String trigger, boolean quiet, boolean forceAi, boolean trackAnger) {
+    private void speak(Player target, String trigger, boolean quiet, boolean forceAi,
+                       boolean trackAnger, int fallbackDelta) {
         if (!isEnabled()) {
             return;
         }
@@ -441,22 +450,26 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         boolean conversational = trackAnger && id != null;
         List<History.Turn> remembered = conversational ? history.recall(id) : List.of();
         if (ai != null && ai.configured() && (forceAi || random.nextDouble() < aiChance)) {
-            String system = Brain.systemPrompt(this, allowedSounds, allowedCommands, tier);
+            String system = Brain.systemPrompt(this, allowedSounds, allowedCommands, tier, grudgeMaxScore);
             String user = Brain.userPrompt(trigger, context(target));
             ai.chat(system, user, History.toMessages(remembered)).whenComplete((result, error) -> {
                 Brain.Reply reply;
                 if (error != null) {
                     getLogger().warning("DeepSeek 调用失败: " + error.getMessage());
                     reply = Brain.local(lines, allowedSounds, random);
+                    if (trackAnger) {
+                        bump(target, fallbackDelta);
+                    }
                 } else {
                     noteUsage(result, trigger);
                     reply = Brain.parse(result.content());
                     if (reply.say().isBlank()) {
                         Brain.Reply fallback = Brain.local(lines, allowedSounds, random);
-                        reply = new Brain.Reply(fallback.say(), reply.actionType(), reply.actionValue(), reply.anger());
+                        reply = new Brain.Reply(fallback.say(), reply.actionType(), reply.actionValue(), reply.score());
                     }
-                    if (trackAnger && target != null && reply.anger() > 0) {
-                        applyAiAnger(target, reply.anger());
+                    if (trackAnger) {
+                        // 记仇值加多少、减多少，全听模型的这一行 SCORE；账本自己会夹在 0~上限之间
+                        bump(target, reply.score());
                     }
                     // 只记成功过的真实回复；失败/兜底不进记忆，省得它"记得"自己没说过的话
                     if (conversational && !reply.say().isBlank()) {
@@ -466,6 +479,10 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 deliver(reply, target, quiet);
             });
         } else {
+            // 没配 API / 概率没命中：模型不在场，这时才用词表兜底
+            if (trackAnger) {
+                bump(target, fallbackDelta);
+            }
             Brain.Reply reply = Brain.local(lines, allowedSounds, random);
             if (prankEnabled && target != null && tier > 0) {
                 int idx = Math.min(actionChance.length - 1, tier);
@@ -550,15 +567,12 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         return tier;
     }
 
-    /** 模型判定的生气值，最多只让它加 ai-anger-points 分，避免模型情绪化乱记账。 */
-    private void applyAiAnger(Player player, int anger) {
-        if (aiAngerPoints <= 0) {
-            return;
+    /** 词表兜底分：只在模型这条路走不通时才用（`prank.fallback-words` 可整个关掉）。 */
+    private int fallbackDelta(String message) {
+        if (!fallbackWords || !prankEnabled) {
+            return 0;
         }
-        int delta = Math.min(anger, aiAngerPoints);
-        if (delta > 0) {
-            bump(player, delta);
-        }
+        return Brain.wordDelta(message, insultWords, praiseWords, insultPoints, praisePoints);
     }
 
     private void bump(Player player, int delta) {
@@ -602,18 +616,6 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         }, delay);
     }
 
-    private static boolean containsAny(String message, List<String> words) {
-        if (message == null || words.isEmpty()) {
-            return false;
-        }
-        String lower = message.toLowerCase(Locale.ROOT);
-        for (String word : words) {
-            if (lower.contains(word)) {
-                return true;
-            }
-        }
-        return false;
-    }
 
     // ---------------------------------------------------------------- 事件
 
@@ -634,14 +636,9 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 return;
             }
             lastReply.put(player.getUniqueId(), now);
-            if (prankEnabled) {
-                if (containsAny(message, insultWords)) {
-                    bump(player, insultPoints);
-                } else if (containsAny(message, praiseWords)) {
-                    bump(player, praisePoints);
-                }
-            }
-            speak(player, player.getName() + " 用 @ 对你说了：" + message, false, true, true);
+            // 记仇值怎么变交给模型的 SCORE 行；词表分只是模型不可用时的兜底
+            speak(player, player.getName() + " 用 @ 对你说了：" + message,
+                    false, true, true, fallbackDelta(message));
             return;
         }
 
@@ -728,14 +725,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 }
                 lastReply.put(player.getUniqueId(), now);
                 player.sendMessage(colorize("§8……它在听着"));
-                if (prankEnabled) {
-                    if (containsAny(text, insultWords)) {
-                        bump(player, insultPoints);
-                    } else if (containsAny(text, praiseWords)) {
-                        bump(player, praisePoints);
-                    }
-                }
-                speak(player, player.getName() + " 对你说：" + text, true, true, true);
+                speak(player, player.getName() + " 对你说：" + text, true, true, true, fallbackDelta(text));
             }
             case "poke" -> {
                 if (!hasAdmin(sender)) {
@@ -891,8 +881,14 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 sender.sendMessage("§7 只有被 " + String.join(" / ", mentionTriggers) + " 才回复；"
                         + "引导窗口 " + guideWindowSeconds + " 秒");
                 sender.sendMessage("§7 记仇：" + (prankEnabled ? "开" : "关")
-                        + "  等级线 " + grudgeTiers[0] + "/" + grudgeTiers[1] + "/" + grudgeTiers[2]
+                        + "  上限 " + grudgeMaxScore + "  等级线 "
+                        + grudgeTiers[0] + "/" + grudgeTiers[1] + "/" + grudgeTiers[2]
                         + "  淡忘 " + grudgeDecayPerHour + " 分/小时");
+                sender.sendMessage("§7 判分：由 AI 自己给（SCORE " + Brain.SCORE_MIN + " ~ +" + Brain.SCORE_MAX
+                        + "，正=记仇、负=消气）"
+                        + (fallbackWords
+                            ? "；词表仅在模型不可用时兜底（骂 +" + insultPoints + " / 夸 " + praisePoints + "）"
+                            : "；词表兜底已关闭"));
                 sender.sendMessage("§7 捉弄：惊吓" + (jumpscareEnabled ? "开" : "关")
                         + " · 闪电" + (lightningEnabled ? "开" : "关")
                         + (lightningRealDamage ? "（真伤害" + (lightningLethal ? "·可致死" : "") + "）" : "（仅特效）")
@@ -924,7 +920,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 sender.sendMessage(colorize("§7正在测试 DeepSeek 连通性……"));
                 long started = System.currentTimeMillis();
                 getLogger().info("[测试] 开始调用 DeepSeek：" + text);
-                ai.chat(Brain.systemPrompt(this, allowedSounds, allowedCommands, 0),
+                ai.chat(Brain.systemPrompt(this, allowedSounds, allowedCommands, 0, grudgeMaxScore),
                         Brain.userPrompt("管理员正在做连通性测试，对他说：" + text, "（测试场景）"))
                         .whenComplete((result, error) -> {
                             long ms = System.currentTimeMillis() - started;
