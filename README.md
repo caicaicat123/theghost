@@ -11,12 +11,61 @@
 
 ## 安装
 
-1. 编译：`powershell -File build.ps1`（首次先跑 `node tools\fetch-libs.cjs` 下载编译依赖）
-2. 把 `dist\theghost-1.6.0.jar` 放进服务器的 `plugins\` 目录
+1. 编译：`pwsh -NoProfile -File build.ps1`（首次先跑 `node tools\fetch-libs.cjs` 下载编译依赖）
+2. 把 `dist\theghost-1.8.0.jar` 放进服务器的 `plugins\` 目录
 3. 启动或重启服务器，会生成 `plugins\TheGhost\config.yml`
-4. 在配置里填 `deepseek.api-key`，然后 `/ghost reload`（或重启）
+4. 选择 `ai.provider`，填写对应 API Key 与模型，再 `/ghost reload`；旧配置无需修改，默认仍使用 `deepseek.api-key`。
 
 不填 API Key 也能跑：它会退回使用 `config.yml` 里的本地台词，一样会出来搞怪，只是不会临场发挥。
+
+## AI 服务商接入（1.8.0）
+
+| ai.provider | 配置位置 | 协议 |
+| --- | --- | --- |
+| `deepseek`（默认） | `deepseek.*` | DeepSeek Chat Completions，旧配置兼容 |
+| `openai` | `ai.providers.openai.*` | OpenAI Chat Completions |
+| `anthropic` 或 `claude` | `ai.providers.anthropic.*` | Claude 原生 Messages |
+| `kimi`（`moonshot`） | `ai.providers.kimi.*` | 月之暗面 Kimi，OpenAI 兼容 |
+| `zhipu`（`glm`） | `ai.providers.zhipu.*` | 智谱 AI，OpenAI 兼容 |
+| `minimax` | `ai.providers.minimax.*` | MiniMax，OpenAI 兼容 |
+| `baichuan` | `ai.providers.baichuan.*` | 百川智能，OpenAI 兼容 |
+| `stepfun`（`step`） | `ai.providers.stepfun.*` | 阶跃星辰，OpenAI 兼容 |
+| `doubao`（`ark`） | `ai.providers.doubao.*` | 字节豆包 / 火山方舟，OpenAI 兼容 |
+| `qwen`（`aliyun`、`dashscope`） | `ai.providers.qwen.*` | 阿里通义千问 / 百炼，OpenAI 兼容 |
+| `ernie`（`baidu`、`qianfan`） | `ai.providers.ernie.*` | 百度文心 / 千帆 V2，OpenAI 兼容 |
+| `hunyuan`（`tencent`） | `ai.providers.hunyuan.*` | 腾讯混元，OpenAI 兼容 |
+| `spark`（`iflytek`） | `ai.providers.spark.*` | 讯飞星火 HTTP，OpenAI 兼容 |
+| `xai`（`grok`） | `ai.providers.xai.*` | xAI Grok，OpenAI 兼容 |
+| `mistral` | `ai.providers.mistral.*` | Mistral AI，OpenAI 兼容 |
+| `openai-compatible` | `ai.providers.openai-compatible.*` | 通用 OpenAI 兼容 Chat Completions |
+
+例如接 Claude：将 `ai.provider` 改为 `anthropic`，在 `ai.providers.anthropic` 下填写
+`api-key` 和账号可用的 `model`。OpenAI 同理使用 `openai`。每次只启用一个服务商，其他配置保留便于切换。
+
+`base-url` 包含版本路径（OpenAI/Claude 默认带 `/v1`），客户端自动追加 `/chat/completions` 或 `/messages`；
+不要填完整请求端点。第三方网关选择与它匹配的协议。模型 ID 自填，插件不限制名单，不保证账号有权限。
+本次已做离线及本地模拟验证，尚未使用真实账号验证各服务商可用性。
+15 家服务商各自独立配置；别名仍读取表内的规范配置位置。
+Gemini、Cohere、Meta 官方 Llama API 未接入；自部署或第三方托管 Llama 若提供 OpenAI 兼容协议，可使用通用入口。
+凭据差异、地区与模型限制、官方资料见 [服务商配置说明](PROVIDERS.md)。
+
+部分模型不接受 `temperature`，可设置 `send-temperature: false`（OpenAI/Claude 默认关闭）；
+OpenAI 默认用 `max_completion_tokens`，兼容服务默认用 `max_tokens`，可用 `token-parameter` 切换。
+DeepSeek 的 `thinking` 参数仅发给 DeepSeek。推理模型可能将额度消耗在内部推理，空文本时可提高
+`max-tokens` 或换模型；插件没有实现所有模型的专用参数。Claude 只提取文本块，不执行工具调用。
+所有服务商复用原有动作白名单、心情解析、历史记忆及失败时的本地台词兜底。
+
+`extra-body` 支持填写模型专用的额外 JSON 对象参数（YAML 映射，支持嵌套），例如千问的
+`enable_thinking: false`，或部分模型要求的 `reasoning_effort`。参数是否被接受由所选模型决定。
+不能用它覆盖 `model/messages/system/stream`。MiniMax 等模型在正文内返回的 `<think>...</think>`
+会先过滤，再进入游戏和对话记忆。推理模型可能需要更高的输出上限与超时。
+
+`/ghost status` 显示当前服务商、模型和 token；切换服务商或模型时用量清零，费用以服务商账单为准。
+Claude 的缓存写入 token 计入非命中，缓存读写价格可能不同。
+启动网络探测不验证密钥；请用 `/ghost test 你好` 检查真实调用。
+
+协议参考：[OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、
+[Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create)。
 
 ## 指令
 
@@ -69,7 +118,7 @@
 20 轮大约 1200 token，上限还留在 500 的话会被裁掉一大半，等于白配。
 
 真正的成本大头是**输出**（缓存命中时占单次成本约 66%），所以 `max-tokens` 比上下文更值得抠。
-`/ghost status` 会显示累计的命中/未命中/输出 token 与估算花费，可以对账。
+`/ghost status` 会显示累计的命中/未命中/输出 token，实际费用以服务商账单为准。
 
 ## 心情、礼物与惩罚（v1.6.0 起）
 
@@ -209,7 +258,8 @@ repo\
 ├─ plugin.yml             插件描述
 ├─ src\mcbot\             Java 源码
 │   ├─ McBot.java         主类：配置、定时搞怪、聊天触发、指令、配额与豁免
-│   ├─ DeepSeek.java      API 客户端（异步、带 token 用量）
+│   ├─ AiClient.java      多服务商客户端（异步、带 token 用量）
+│   ├─ DeepSeek.java      旧客户端构造方式的兼容包装
 │   ├─ Brain.java         提示词构造与回复解析（心情语义、GIFT/JUNK）
 │   ├─ History.java       按玩家的短期对话记忆（环形缓冲 + 空闲过期）
 │   ├─ Mood.java          心情账本（0-50、25 平常心、往中性回归）
@@ -218,7 +268,7 @@ repo\
 │   └─ Json.java          极小 JSON 读写（不引入外部依赖）
 ├─ tools\
 │   ├─ fetch-libs.cjs     下载编译依赖
-│   └─ selftest\          离线自测（124 项：记忆、请求体、心情数学、提示词、配置形状）
+│   └─ selftest\          离线自测（记忆、心情、配置形状、多服务商模拟 HTTP）
 └─ lib\                   编译依赖（paper-api、adventure）
 ```
 

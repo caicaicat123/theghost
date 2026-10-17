@@ -15,7 +15,7 @@ Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $classpath = ((Get-ChildItem "$lib\*.jar" | ForEach-Object { $_.FullName }) + (Join-Path $root 'build\classes')) -join ';'
-& "$jdk\javac.exe" -encoding UTF-8 --release 21 -cp $classpath -d $out (Join-Path $PSScriptRoot 'SelfTest.java')
+& "$jdk\javac.exe" -encoding UTF-8 --release 21 -cp $classpath -d $out (Get-ChildItem $PSScriptRoot -Filter '*.java' | ForEach-Object { $_.FullName })
 if ($LASTEXITCODE -ne 0) { throw '自测编译失败' }
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -23,3 +23,6 @@ if ($LASTEXITCODE -ne 0) { throw '自测编译失败' }
 & "$jdk\java.exe" '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' "-Dtheghost.repo=$root" `
     -cp "$out;$classpath" mcbot.SelfTest
 if ($LASTEXITCODE -ne 0) { throw '自测未全部通过' }
+
+& "$jdk\java.exe" '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' -cp "$out;$classpath" mcbot.ProviderTest
+if ($LASTEXITCODE -ne 0) { throw 'Provider test failed' }

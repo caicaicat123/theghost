@@ -1,5 +1,220 @@
-# McBot 配置
-# 填好 deepseek.api-key 之后重载或重启即可生效。留空则只使用本地台词（不花 token）。
+# TheGhost 配置
+# 默认继续读取旧 deepseek 段；切换服务商后填 Key/模型并 /ghost reload。
+ai:
+  # 见 README 的服务商表；模型名和地区地址以控制台为准
+  provider: deepseek
+  providers:
+    # OpenAI
+    openai:
+      api-key: ""
+      base-url: "https://api.openai.com/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_completion_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # Anthropic Claude
+    anthropic:
+      api-key: ""
+      base-url: "https://api.anthropic.com/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      api-version: "2023-06-01"
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # 月之暗面 Kimi
+    kimi:
+      api-key: ""
+      base-url: "https://api.moonshot.cn/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # 智谱 GLM
+    zhipu:
+      api-key: ""
+      base-url: "https://open.bigmodel.cn/api/paas/v4"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # MiniMax
+    minimax:
+      api-key: ""
+      base-url: "https://api.minimax.cn/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 2048
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # 百川智能
+    baichuan:
+      api-key: ""
+      base-url: "https://api.baichuan-ai.com/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # 阶跃星辰
+    stepfun:
+      api-key: ""
+      base-url: "https://api.stepfun.com/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # 字节豆包（模型名或推理接入点 ID）
+    doubao:
+      api-key: ""
+      base-url: "https://ark.cn-beijing.volces.com/api/v3"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # 阿里通义千问 / 百炼
+    qwen:
+      api-key: ""
+      base-url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body:
+        enable_thinking: false
+    # 百度文心 / 千帆 V2（使用新版 API Key）
+    ernie:
+      api-key: ""
+      base-url: "https://qianfan.baidubce.com/v2"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # 腾讯混元（API Key，非 SecretId/SecretKey）
+    hunyuan:
+      api-key: ""
+      base-url: "https://api.hunyuan.cloud.tencent.com/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # 讯飞星火 HTTP（api-key 填 APIPassword）
+    spark:
+      api-key: ""
+      base-url: "https://spark-api-open.xf-yun.com/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # xAI Grok
+    xai:
+      api-key: ""
+      base-url: "https://api.x.ai/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # Mistral AI
+    mistral:
+      api-key: ""
+      base-url: "https://api.mistral.ai/v1"
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
+    # 其他 OpenAI 兼容服务或自部署模型
+    openai-compatible:
+      api-key: ""
+      base-url: ""
+      # 填账号实际可用的模型 ID，不设置过期模型默认值
+      model: ""
+      max-tokens: 512
+      token-parameter: max_tokens
+      send-temperature: false
+      temperature: 1.0
+      timeout-seconds: 60
+      retries: 1
+      log-usage: false
+      extra-body: {}
 
 deepseek:
   api-key: "在这里填入你的 DeepSeek API Key"

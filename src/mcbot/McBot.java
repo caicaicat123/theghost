@@ -79,7 +79,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     private final AtomicLong usageOut = new AtomicLong();
     private boolean logUsage;
 
-    private DeepSeek ai;
+    private AiClient ai;
     private Mood mood;
     private BukkitTask loopTask;
     private BukkitTask decayTask;
@@ -220,10 +220,10 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         ai.ping().whenComplete((code, error) -> {
             long ms = System.currentTimeMillis() - started;
             if (error != null) {
-                getLogger().warning("DeepSeek 连通性检查失败（" + ms + "ms）：" + error
+                getLogger().warning(ai.provider() + " 连通性检查失败（" + ms + "ms）：" + error
                         + " —— 被 @ 时会退回本地台词");
             } else {
-                getLogger().info("DeepSeek 连通性正常（HTTP " + code + "，用时 " + ms + "ms）");
+                getLogger().info(ai.provider() + " 网络探测返回 HTTP " + code + "（" + ms + "ms，未验证密钥或模型；请用 /ghost test）");
             }
         });
     }
@@ -264,20 +264,40 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
 
     // ---------------------------------------------------------------- 配置
 
+    private static Map<String, Object> apiParameters(org.bukkit.configuration.ConfigurationSection section) {
+        Map<String, Object> values = new java.util.LinkedHashMap<>();
+        if (section != null) for (String key : section.getKeys(false)) {
+            values.put(key, section.isConfigurationSection(key)
+                    ? apiParameters(section.getConfigurationSection(key)) : section.get(key));
+        }
+        return values;
+    }
+
     private void loadSettings() {
         reloadConfig();
         var cfg = getConfig();
 
-        ai = new DeepSeek(
-                cfg.getString("deepseek.api-key", ""),
-                cfg.getString("deepseek.base-url", "https://api.deepseek.com"),
-                cfg.getString("deepseek.model", "deepseek-flash"),
-                cfg.getDouble("deepseek.temperature", 1.35),
-                cfg.getInt("deepseek.max-tokens", 80),
-                cfg.getInt("deepseek.timeout-seconds", 25),
-                Math.max(1, cfg.getInt("deepseek.retries", 1) + 1),
-                cfg.getBoolean("deepseek.thinking", false));
-        logUsage = cfg.getBoolean("deepseek.log-usage", false);
+        AiClient.Provider provider = AiClient.Provider.parse(cfg.getString("ai.provider", "deepseek"));
+        String section = provider == AiClient.Provider.DEEPSEEK ? "deepseek." : "ai.providers." + provider.id + ".";
+        AiClient next = new AiClient(provider,
+                cfg.getString(section + "api-key", ""),
+                cfg.getString(section + "base-url", provider.baseUrl),
+                cfg.getString(section + "model", provider.model),
+                cfg.getDouble(section + "temperature", provider == AiClient.Provider.DEEPSEEK ? 1.35 : 1.0),
+                cfg.getInt(section + "max-tokens", provider == AiClient.Provider.DEEPSEEK ? 80 : 512),
+                cfg.getInt(section + "timeout-seconds", 25),
+                Math.max(1, cfg.getInt(section + "retries", 1) + 1),
+                cfg.getBoolean(section + "thinking", false),
+                cfg.getBoolean(section + "send-temperature", provider == AiClient.Provider.DEEPSEEK),
+                cfg.getString(section + "token-parameter", ""),
+                cfg.getString(section + "api-version", "2023-06-01"),
+                apiParameters(cfg.getConfigurationSection(section + "extra-body")));
+        // 切换服务商/模型后清零，防止将不同计费口径的 token 混算。
+        if (ai != null && (!ai.provider().equals(next.provider()) || !ai.model().equals(next.model()))) {
+            usageCalls.set(0); usageHit.set(0); usageMiss.set(0); usageOut.set(0);
+        }
+        ai = next;
+        logUsage = cfg.getBoolean(section + "log-usage", false);
 
         // ---- 对话记忆 ----
         history.configure(
@@ -543,7 +563,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
             ai.chat(system, user, History.toMessages(remembered)).whenComplete((result, error) -> {
                 Brain.Reply reply;
                 if (error != null) {
-                    getLogger().warning("DeepSeek 调用失败: " + error.getMessage());
+                    getLogger().warning(ai.provider() + " 调用失败: " + error.getMessage());
                     reply = Brain.local(lines, allowedSounds, random);
                     if (trackAnger) {
                         bump(target, fallbackDelta);
@@ -614,7 +634,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
     }
 
     /** 累计一次调用的 token 用量；开了 log-usage 就顺手写一行控制台。 */
-    private void noteUsage(DeepSeek.Result result, String trigger) {
+    private void noteUsage(AiClient.Result result, String trigger) {
         usageCalls.incrementAndGet();
         usageHit.addAndGet(result.cacheHitTokens());
         usageMiss.addAndGet(result.cacheMissTokens());
@@ -624,7 +644,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
             if (label.length() > 40) {
                 label = label.substring(0, 40) + "…";
             }
-            getLogger().info("DeepSeek 用量（" + result.usageLine() + "）：" + label);
+            getLogger().info(ai.provider() + " 用量（" + result.usageLine() + "）：" + label);
         }
     }
 
@@ -993,7 +1013,12 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                     sender.sendMessage("§c需要 theghost.admin 权限。");
                     return true;
                 }
-                loadSettings();
+                try {
+                    loadSettings();
+                } catch (IllegalArgumentException error) {
+                    sender.sendMessage("§cAI 配置无效，请检查 provider、base-url 和 token-parameter；旧配置继续运行。");
+                    return true;
+                }
                 history.clear();
                 startLoop();
                 sender.sendMessage(colorize("§7配置已重载。AI=" + (ai.configured() ? "开启" : "未配置")
@@ -1003,7 +1028,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 sender.sendMessage(colorize("§5幽灵§r 状态："));
                 sender.sendMessage("§7 搞怪：" + (mischiefEnabled ? "开" : "关")
                         + "  间隔：" + intervalSeconds + "±" + jitterSeconds + " 秒"
-                        + "  AI：" + (ai.configured() ? "已配置" : "未配置"));
+                        + "  AI：" + ai.provider() + " / " + ai.model() + "（" + (ai.configured() ? "已配置" : "未配置") + "）");
                 sender.sendMessage("§7 只有被 " + String.join(" / ", mentionTriggers) + " 才回复；"
                         + "引导窗口 " + guideWindowSeconds + " 秒");
                 sender.sendMessage("§7 心情：" + (prankEnabled ? "开" : "关")
@@ -1043,8 +1068,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                 sender.sendMessage("§7 用量：" + usageCalls.get() + " 次调用；"
                         + "输入命中 " + usageHit.get() + " / 未命中 " + usageMiss.get()
                         + " / 输出 " + usageOut.get() + " token");
-                sender.sendMessage("§7 估算花费：§f" + String.format(Locale.ROOT, "%.4f", estimatedCost())
-                        + " 元§7（按 " + ai.model() + " 空闲时段价：命中 0.02 / 未命中 1 / 输出 4 元每百万 token）");
+                sender.sendMessage("§7 费用以服务商账单为准；跨服务商不使用 DeepSeek 单价估算。");
             }
             case "test" -> {
                 if (!hasAdmin(sender)) {
@@ -1052,15 +1076,15 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
                     return true;
                 }
                 if (ai == null || !ai.configured()) {
-                    sender.sendMessage(colorize("§c还没配置 deepseek.api-key。"));
+                    sender.sendMessage(colorize("§c请配置当前服务商的 api-key、base-url 和 model。"));
                     return true;
                 }
                 String text = args.length > 1
                         ? String.join(" ", Arrays.copyOfRange(args, 1, args.length))
                         : "你好";
-                sender.sendMessage(colorize("§7正在测试 DeepSeek 连通性……"));
+                sender.sendMessage(colorize("§7正在测试 " + ai.provider() + " 连通性……"));
                 long started = System.currentTimeMillis();
-                getLogger().info("[测试] 开始调用 DeepSeek：" + text);
+                getLogger().info("[测试] 开始调用 " + ai.provider() + "：" + text);
                 ai.chat(Brain.systemPrompt(this, allowedSounds, allowedCommands, moodOf(moodNeutral)),
                         Brain.userPrompt("管理员正在做连通性测试，对他说：" + text, "（测试场景）"))
                         .whenComplete((result, error) -> {
@@ -1106,10 +1130,7 @@ public final class McBot extends JavaPlugin implements Listener, CommandExecutor
         return options.stream().filter(s -> s.toLowerCase(Locale.ROOT).startsWith(lower)).collect(Collectors.toList());
     }
 
-    /** 按 deepseek-flash 空闲时段单价估算累计花费（高峰时段翻倍）。 */
-    private double estimatedCost() {
-        return (usageHit.get() * 0.02 + usageMiss.get() * 1.0 + usageOut.get() * 4.0) / 1_000_000.0;
-    }
+
 
     private String allowedPranks(int tier) {
         List<String> list = new ArrayList<>();

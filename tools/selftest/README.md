@@ -8,15 +8,19 @@
 在 `repo\` 目录下：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\selftest\run.ps1
+pwsh -NoProfile -File tools\selftest\run.ps1
 ```
 
-（用 pwsh 7 或加 `-ExecutionPolicy Bypass` 都行：`build.ps1` 是 UTF-8 无 BOM，
-Windows PowerShell 5.1 读中文会乱码并解析失败。）
+（请用 PowerShell 7；脚本为 UTF-8 无 BOM，Windows PowerShell 5.1 可能读错中文编码。）
 
 脚本会先调 `build.ps1` 重新编译，再编译并运行 `SelfTest.java`（和插件同包，
 所以能直接测包内可见的 `DeepSeek.body` / `DeepSeek.extract`）。全部通过时退出码为 0，
 可以用在发布前的例行检查里。
+
+脚本还会编译并运行 `ProviderTest.java`，启动仅监听 `127.0.0.1` 的模拟 HTTP 服务，
+验证 15 家服务商和通用入口的鉴权、路径、历史消息、独立 system、token 参数和用量解析，
+以及别名、默认地址、额外参数、HTTP 往返、MiniMax 思考标签过滤、503 重试、401 错误脱敏、空文本失败。
+当前多服务商部分为 202 项检查。不会调用外部 API，也不会花费 token。
 
 ## 覆盖内容
 
